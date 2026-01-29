@@ -182,8 +182,9 @@ class TestGetR2Config:
 class TestValidateR2Connection:
     """Test R2 connection validation."""
     
-    def test_raises_on_missing_creds(self, monkeypatch):
+    def test_raises_on_missing_creds(self, monkeypatch, rclone_mock):
         """Should raise if credentials missing."""
+        rclone_mock({}) # Ensure subprocess is mocked
         for var in ['RCLONE_CONFIG_R2_ACCESS_KEY_ID', 'RCLONE_CONFIG_R2_SECRET_ACCESS_KEY', 'RCLONE_CONFIG_R2_ENDPOINT']:
             monkeypatch.delenv(var, raising=False)
         

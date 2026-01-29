@@ -11,39 +11,57 @@ import vlfs
 class TestHasDriveToken:
     """Test Drive token detection."""
     
-    def test_returns_true_when_token_exists(self, repo_root):
+    def test_returns_true_when_token_exists(self, repo_root, monkeypatch, tmp_path):
         """Should return True if token file exists."""
-        token_file = repo_root / '.vlfs' / 'gdrive-token.json'
+        user_config = tmp_path / 'user_config'
+        user_config.mkdir()
+        monkeypatch.setenv('VLFS_USER_CONFIG', str(user_config))
+        
+        token_file = user_config / 'gdrive-token.json'
         token_file.write_text('{"token": "test"}')
         
         result = vlfs.has_drive_token(repo_root / '.vlfs')
         
         assert result is True
     
-    def test_returns_false_when_no_token(self, repo_root):
+    def test_returns_false_when_no_token(self, repo_root, monkeypatch, tmp_path):
         """Should return False if token file missing."""
+        user_config = tmp_path / 'user_config'
+        user_config.mkdir()
+        monkeypatch.setenv('VLFS_USER_CONFIG', str(user_config))
+        
         result = vlfs.has_drive_token(repo_root / '.vlfs')
         
         assert result is False
     
-    def test_raises_in_ci_without_token(self, repo_root, monkeypatch):
+    def test_raises_in_ci_without_token(self, repo_root, monkeypatch, tmp_path):
         """Should raise in CI environment without token."""
+        user_config = tmp_path / 'user_config'
+        user_config.mkdir()
+        monkeypatch.setenv('VLFS_USER_CONFIG', str(user_config))
         monkeypatch.setenv('CI', 'true')
         
         with pytest.raises(RuntimeError, match='not available in CI'):
             vlfs.has_drive_token(repo_root / '.vlfs')
     
-    def test_raises_with_vlfs_no_drive(self, repo_root, monkeypatch):
+    def test_raises_with_vlfs_no_drive(self, repo_root, monkeypatch, tmp_path):
         """Should raise when VLFS_NO_DRIVE is set."""
+        user_config = tmp_path / 'user_config'
+        user_config.mkdir()
+        monkeypatch.setenv('VLFS_USER_CONFIG', str(user_config))
         monkeypatch.setenv('VLFS_NO_DRIVE', '1')
         
         with pytest.raises(RuntimeError, match='not available'):
             vlfs.has_drive_token(repo_root / '.vlfs')
     
-    def test_returns_true_in_ci_with_token(self, repo_root, monkeypatch):
+    def test_returns_true_in_ci_with_token(self, repo_root, monkeypatch, tmp_path):
         """Should return True in CI if token exists."""
+        user_config = tmp_path / 'user_config'
+        user_config.mkdir()
+        monkeypatch.setenv('VLFS_USER_CONFIG', str(user_config))
         monkeypatch.setenv('CI', 'true')
-        token_file = repo_root / '.vlfs' / 'gdrive-token.json'
+        
+        token_file = user_config / 'gdrive-token.json'
         token_file.write_text('{"token": "test"}')
         
         result = vlfs.has_drive_token(repo_root / '.vlfs')
@@ -70,6 +88,60 @@ class TestWriteRcloneDriveConfig:
         assert 'type = drive' in content
         assert 'client_id = test-id' in content
         assert 'client_secret = test-secret' in content
+
+
+class TestAuthGdrive:
+    """Test auth gdrive command."""
+
+    def test_auth_gdrive_success(self, repo_root, monkeypatch, tmp_path, rclone_mock, capsys):
+        """Should extract token and write gdrive-token.json."""
+        user_config = tmp_path / 'user_config'
+        user_config.mkdir()
+        monkeypatch.setenv('VLFS_USER_CONFIG', str(user_config))
+
+        # Setup user config with creds
+        (user_config / 'config.toml').write_text(
+            '[drive]\nclient_id="cid"\nclient_secret="sec"'
+        )
+
+        # Mock rclone config to write a dummy config file with token
+        def handler(cmd):
+            # When rclone config is called, write the config file it's supposed to generate
+            # In real life, rclone interactive auth does this.
+            # Here we simulate it by writing the file directly.
+            config_file = Path(cmd[3]) # rclone config --config <file>
+            content = config_file.read_text()
+            # Replace empty token with valid one
+            if 'token = \n' in content:
+                new_content = content.replace('token = \n', 'token = {"access_token":"valid"}\n')
+                config_file.write_text(new_content)
+            else:
+                # Fallback
+                config_file.write_text(content + 'token = {"access_token":"valid"}\n')
+            return 0, '', ''
+
+        rclone_mock({'_handler': handler})
+
+        # Run auth
+        result = vlfs.auth_gdrive(repo_root / '.vlfs')
+
+        assert result == 0
+        token_file = user_config / 'gdrive-token.json'
+        assert token_file.exists()
+        assert 'access_token' in token_file.read_text()
+        assert 'valid' in token_file.read_text()
+
+    def test_auth_gdrive_no_creds(self, repo_root, monkeypatch, tmp_path, capsys):
+        """Should fail if no creds in user config."""
+        user_config = tmp_path / 'user_config'
+        user_config.mkdir()
+        monkeypatch.setenv('VLFS_USER_CONFIG', str(user_config))
+
+        result = vlfs.auth_gdrive(repo_root / '.vlfs')
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert 'Drive credentials not found' in captured.out
 
 
 class TestGroupObjectsByRemote:
@@ -216,10 +288,13 @@ class TestDownloadFromDrive:
 class TestCmdPushPrivate:
     """Test push command with --private flag."""
     
-    def test_private_flag_uploads_to_drive(self, repo_root, monkeypatch, rclone_mock, capsys):
+    def test_private_flag_uploads_to_drive(self, repo_root, monkeypatch, rclone_mock, capsys, tmp_path):
         """--private should upload to Drive."""
-        # Create Drive token
-        (repo_root / '.vlfs' / 'gdrive-token.json').write_text('{"token": "test"}')
+        # Setup user config with token
+        user_config = tmp_path / 'user_config'
+        user_config.mkdir()
+        monkeypatch.setenv('VLFS_USER_CONFIG', str(user_config))
+        (user_config / 'gdrive-token.json').write_text('{"token": "test"}')
         
         test_file = repo_root / 'private' / 'secret.txt'
         test_file.parent.mkdir(exist_ok=True)
@@ -238,8 +313,13 @@ class TestCmdPushPrivate:
         index = vlfs.read_index(repo_root / '.vlfs')
         assert index['entries']['private/secret.txt']['remote'] == 'gdrive'
     
-    def test_private_without_token_fails(self, repo_root, monkeypatch, capsys):
+    def test_private_without_token_fails(self, repo_root, monkeypatch, capsys, tmp_path):
         """--private should fail without Drive token."""
+        # Setup empty user config (no token)
+        user_config = tmp_path / 'user_config'
+        user_config.mkdir()
+        monkeypatch.setenv('VLFS_USER_CONFIG', str(user_config))
+
         test_file = repo_root / 'private' / 'secret.txt'
         test_file.parent.mkdir(exist_ok=True)
         test_file.write_bytes(b'secret content')
@@ -253,6 +333,9 @@ class TestCmdPushPrivate:
     
     def test_default_pushes_to_r2(self, repo_root, monkeypatch, rclone_mock):
         """Default push should go to R2."""
+        monkeypatch.setattr(vlfs, 'ensure_r2_auth', lambda: 0)
+        monkeypatch.setattr(vlfs, 'validate_r2_connection', lambda *args, **kwargs: True)
+
         test_file = repo_root / 'public' / 'file.txt'
         test_file.parent.mkdir(exist_ok=True)
         test_file.write_bytes(b'public content')
@@ -274,12 +357,15 @@ class TestCmdPushPrivate:
 class TestCmdPullMixedRemotes:
     """Test pull command with mixed R2 and Drive remotes."""
     
-    def test_pulls_from_both_remotes(self, repo_root, monkeypatch):
+    def test_pulls_from_both_remotes(self, repo_root, monkeypatch, tmp_path):
         """Should pull from both R2 and Drive."""
         monkeypatch.setattr(vlfs, 'validate_r2_connection', lambda *args, **kwargs: True)
 
-        # Create Drive token
-        (repo_root / '.vlfs' / 'gdrive-token.json').write_text('{"token": "test"}')
+        # Setup user config with token
+        user_config = tmp_path / 'user_config'
+        user_config.mkdir()
+        monkeypatch.setenv('VLFS_USER_CONFIG', str(user_config))
+        (user_config / 'gdrive-token.json').write_text('{"token": "test"}')
         
         # Create index with mixed remotes
         index = {
