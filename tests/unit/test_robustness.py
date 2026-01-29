@@ -62,6 +62,8 @@ class TestCmdPushRobustness:
     
     def test_push_uses_file_lock(self, repo_root, monkeypatch):
         """Push should lock index during update."""
+        monkeypatch.setattr(vlfs, 'validate_r2_connection', lambda *args, **kwargs: True)
+
         test_file = repo_root / 'test.txt'
         test_file.write_bytes(b'test content')
         
@@ -139,6 +141,8 @@ class TestCmdPullRobustness:
     
     def test_pull_dry_run(self, repo_root, monkeypatch, capsys):
         """Pull dry run should show what would be done."""
+        monkeypatch.setattr(vlfs, 'validate_r2_connection', lambda *args, **kwargs: True)
+
         # Setup: push a file first
         test_file = repo_root / 'test.txt'
         test_file.write_bytes(b'test content')
@@ -191,6 +195,8 @@ class TestIntegrationWorkflow:
     
     def test_push_then_pull_roundtrip(self, repo_root, monkeypatch):
         """Full push then pull roundtrip."""
+        monkeypatch.setattr(vlfs, 'validate_r2_connection', lambda *args, **kwargs: True)
+
         test_file = repo_root / 'assets' / 'test.bin'
         test_file.write_bytes(b'secret data 12345')
         

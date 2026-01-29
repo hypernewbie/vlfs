@@ -213,7 +213,7 @@ class TestMaterializeWorkspace:
             }
         }
         
-        files_written, bytes_written = vlfs.materialize_workspace(index, repo_root, cache_dir)
+        files_written, bytes_written, _ = vlfs.materialize_workspace(index, repo_root, cache_dir)
         
         assert files_written == 1
         assert (repo_root / 'test.txt').exists()
@@ -241,7 +241,7 @@ class TestMaterializeWorkspace:
             }
         }
         
-        files_written, _ = vlfs.materialize_workspace(index, repo_root, cache_dir)
+        files_written, _, _ = vlfs.materialize_workspace(index, repo_root, cache_dir)
         
         assert files_written == 0  # Already up to date
     
@@ -265,7 +265,7 @@ class TestMaterializeWorkspace:
             }
         }
         
-        files_written, _ = vlfs.materialize_workspace(index, repo_root, cache_dir, dry_run=True)
+        files_written, _, _ = vlfs.materialize_workspace(index, repo_root, cache_dir, dry_run=True)
         captured = capsys.readouterr()
         
         assert files_written == 1  # Counted but not written
@@ -286,6 +286,6 @@ class TestMaterializeWorkspace:
             }
         }
         
-        files_written, _ = vlfs.materialize_workspace(index, repo_root, cache_dir)
+        files_written, _, _ = vlfs.materialize_workspace(index, repo_root, cache_dir)
         
         assert files_written == 0  # Skipped missing object

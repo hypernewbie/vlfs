@@ -305,8 +305,7 @@ class FileLock:
         if sys.platform == 'win32':
             import msvcrt
             self._handle = self._lockfile.fileno()
-            # Lock the entire file
-            msvcrt.locking(self._handle, msvcrt.LK_NBLCK, 1)
+            # Lock the entire file (blocking)
             msvcrt.locking(self._handle, msvcrt.LK_LOCK, 1)
         else:
             import fcntl
@@ -483,7 +482,7 @@ def download_from_r2(
         return len(object_keys)
     
     # Build files-from list for batch download
-    files_list = [f"{bucket}/{key}" for key in object_keys]
+    files_list = object_keys
     
     # Write to temp file
     with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
@@ -505,6 +504,62 @@ def download_from_r2(
         return len(object_keys)
     finally:
         os.unlink(files_from_path)
+
+
+def download_http(url: str, dest: Path, timeout: float = 60) -> None:
+    """Download URL to dest atomically."""
+    import urllib.request
+    import urllib.error
+    
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(dir=dest.parent)
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            while chunk := resp.read(65536):
+                os.write(fd, chunk)
+        os.close(fd)
+        os.replace(temp_path, dest)
+    except Exception:
+        os.close(fd)
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+        raise
+
+
+def download_from_r2_http(
+    object_keys: list[str],
+    cache_dir: Path,
+    base_url: str,
+    dry_run: bool = False
+) -> int:
+    """Download objects via HTTP (no auth required)."""
+    downloaded = 0
+    # Use ThreadPool for parallel downloads
+    
+    def _download_one(key: str) -> bool:
+        dest = cache_dir / 'objects' / key
+        if dest.exists():
+            return False
+            
+        url = f"{base_url.rstrip('/')}/{key}"
+        if dry_run:
+            print(f"[DRY-RUN] Would download {url}")
+            return True
+            
+        try:
+            download_http(url, dest)
+            return True
+        except Exception as e:
+            print(f"Error downloading {url}: {e}", file=sys.stderr)
+            return False
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(_download_one, key) for key in object_keys]
+        for future in as_completed(futures):
+            if future.result():
+                downloaded += 1
+                
+    return downloaded
 
 
 def compute_missing_objects(index: dict[str, Any], cache_dir: Path) -> list[str]:
@@ -544,22 +599,25 @@ def materialize_workspace(
     index: dict[str, Any],
     repo_root: Path,
     cache_dir: Path,
+    force: bool = False,
     dry_run: bool = False
-) -> tuple[int, int]:
+) -> tuple[int, int, list[str]]:
     """Decompress objects from cache into workspace.
     
     Args:
         index: Index dict with entries
         repo_root: Repository root path
         cache_dir: Local cache directory
+        force: If True, overwrite modified files
         dry_run: If True, don't actually write files
     
     Returns:
-        Tuple of (files_written, bytes_written)
+        Tuple of (files_written, bytes_written, skipped_files)
     """
     entries = index.get('entries', {})
     files_written = 0
     bytes_written = 0
+    skipped_files = []
     
     for rel_path, entry in entries.items():
         object_key = entry.get('object_key')
@@ -569,14 +627,20 @@ def materialize_workspace(
         # Target path in workspace
         file_path = repo_root / rel_path.replace('/', os.sep)
         
-        # Skip if already exists and matches
+        # Check if file exists
         if file_path.exists():
             try:
                 hex_digest, _, _ = hash_file(file_path)
+                # If matches target, we are good (already up to date)
                 if hex_digest == entry.get('hash'):
                     continue
+                
+                # If different, and NOT force, skip
+                if not force:
+                    skipped_files.append(rel_path)
+                    continue
             except (OSError, IOError):
-                pass  # Will overwrite
+                pass  # Will overwrite if we can't read/hash
         
         # Load from cache
         try:
@@ -605,7 +669,7 @@ def materialize_workspace(
                 os.unlink(temp_path)
             raise
     
-    return files_written, bytes_written
+    return files_written, bytes_written, skipped_files
 
 
 def has_drive_token(vlfs_dir: Path) -> bool:
@@ -656,11 +720,13 @@ def auth_gdrive(vlfs_dir: Path) -> int:
     """Interactive Google Drive authentication.
     
     Args:
-        vlfs_dir: Path to .vlfs directory
+        vlfs_dir: Path to .vlfs directory (unused, kept for compat)
     
     Returns:
         Exit code (0 for success)
     """
+    user_dir = get_user_config_dir()
+    
     print("Setting up Google Drive authentication...")
     print()
     print("You'll need to create OAuth2 credentials from Google Cloud Console:")
@@ -671,33 +737,37 @@ def auth_gdrive(vlfs_dir: Path) -> int:
     print("5. Note the Client ID and Client Secret")
     print()
     
-    # Check if config.toml has credentials
-    config = load_config(vlfs_dir)
-    drive_config = config.get('drive', {})
-    
-    client_id = drive_config.get('client_id')
-    client_secret = drive_config.get('client_secret')
+    # Read client credentials from user config
+    user_config_path = user_dir / 'config.toml'
+    user_config = {}
+    if user_config_path.exists():
+        import tomllib
+        with user_config_path.open('rb') as f:
+            user_config = tomllib.load(f)
+            
+    client_id = user_config.get('drive', {}).get('client_id')
+    client_secret = user_config.get('drive', {}).get('client_secret')
     
     if not client_id or not client_secret:
-        print("Error: Drive credentials not found in .vlfs/config.toml")
+        print(f"Error: Drive credentials not found in {user_config_path}")
         print()
-        print("Add the following to .vlfs/config.toml:")
+        print(f"Add the following to {user_config_path}:")
         print()
         print("[drive]")
         print('client_id = "YOUR_CLIENT_ID"')
         print('client_secret = "YOUR_CLIENT_SECRET"')
         return 1
     
-    # Write rclone config
-    write_rclone_drive_config(vlfs_dir, {
+    # Write rclone config to user dir
+    write_rclone_drive_config(user_dir, {
         'client_id': client_id,
         'client_secret': client_secret,
         'scope': 'drive',
         'token': '',  # Will be populated by rclone
     })
     
-    config_file = vlfs_dir / 'rclone.conf'
-    token_file = vlfs_dir / 'gdrive-token.json'
+    config_file = user_dir / 'rclone.conf'
+    token_file = user_dir / 'gdrive-token.json'
     
     print(f"Running rclone config...")
     print(f"Config file: {config_file}")
@@ -803,7 +873,7 @@ def download_from_drive(
         return len(object_keys)
     
     # Build files-from list for batch download
-    files_list = [f"{bucket}/{key}" for key in object_keys]
+    files_list = object_keys
     
     # Write to temp file
     with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
@@ -854,6 +924,17 @@ def group_objects_by_remote(index: dict[str, Any]) -> dict[str, list[tuple[str, 
     return groups
 
 
+def warn_if_secrets_in_repo(vlfs_dir: Path) -> None:
+    """Warn if secrets detected in repo config."""
+    config_path = vlfs_dir / 'config.toml'
+    if not config_path.exists():
+        return
+    content = config_path.read_text()
+    if 'client_secret' in content or 'secret_access_key' in content:
+        print(colorize("Warning: Secrets detected in .vlfs/config.toml", "YELLOW"), file=sys.stderr)
+        print("Move secrets to ~/.config/vlfs/config.toml", file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point."""
     parser = argparse.ArgumentParser(prog='vlfs', description='Virtual Large File Storage', exit_on_error=False)
@@ -871,6 +952,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # pull command
     pull_parser = subparsers.add_parser('pull', help='Download files from remote')
+    pull_parser.add_argument('--force', action='store_true', help='Overwrite locally modified files')
     pull_parser.add_argument('--dry-run', action='store_true', help='Show what would be done without doing it')
 
     # push command
@@ -931,10 +1013,25 @@ def main(argv: list[str] | None = None) -> int:
     vlfs_dir, cache_dir = resolve_paths(repo_root)
     ensure_dirs(vlfs_dir, cache_dir)
     ensure_gitignore(repo_root)
+    
+    warn_if_secrets_in_repo(vlfs_dir)
 
     # Set rclone config path if available
-    config_path = vlfs_dir / 'rclone.conf'
-    set_rclone_config_path(config_path if config_path.exists() else None)
+    # Check user dir first, then legacy
+    user_config_path = get_user_config_dir() / 'rclone.conf'
+    legacy_config_path = vlfs_dir / 'rclone.conf'
+    
+    if user_config_path.exists():
+        set_rclone_config_path(user_config_path)
+    elif legacy_config_path.exists():
+        set_rclone_config_path(legacy_config_path)
+    else:
+        set_rclone_config_path(None)
+
+    # Ensure rclone config is up to date with environment
+    if args.command in ('pull', 'push') and not dry_run:
+        # We don't write to repo anymore
+        pass
     
     if args.command == 'status':
         return cmd_status(repo_root, vlfs_dir, dry_run, json_output, args.color)
@@ -943,7 +1040,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == 'clean':
         return cmd_clean(repo_root, vlfs_dir, cache_dir, dry_run, args.yes)
     elif args.command == 'pull':
-        return cmd_pull(repo_root, vlfs_dir, cache_dir, dry_run)
+        return cmd_pull(repo_root, vlfs_dir, cache_dir, getattr(args, 'force', False), dry_run)
     elif args.command == 'push':
         if args.all:
             return cmd_push_all(repo_root, vlfs_dir, cache_dir, args.private, dry_run)
@@ -956,6 +1053,22 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     
     return 0
+
+
+def get_user_config_dir() -> Path:
+    """Return ~/.config/vlfs/, creating if needed."""
+    env_override = os.environ.get('VLFS_USER_CONFIG')
+    if env_override:
+        config_dir = Path(env_override)
+    elif os.name == 'nt':
+        base = Path(os.environ.get('APPDATA', Path.home() / 'AppData' / 'Roaming'))
+        config_dir = base / 'vlfs'
+    else:
+        base = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config'))
+        config_dir = base / 'vlfs'
+    
+    config_dir.mkdir(parents=True, exist_ok=True)
+    return config_dir
 
 
 def resolve_paths(repo_root: Path) -> tuple[Path, Path]:
@@ -986,8 +1099,10 @@ def ensure_gitignore(repo_root: Path) -> None:
     gitignore = repo_root / '.gitignore'
     
     required_entries = [
-        '.vlfs/gdrive-token.json',
         '.vlfs-cache/',
+        # Legacy/fallback ignores just in case
+        '.vlfs/gdrive-token.json',
+        '.vlfs/rclone.conf',
     ]
     
     existing_content = ''
@@ -1016,6 +1131,31 @@ def load_config(vlfs_dir: Path) -> dict[str, Any]:
     import tomllib
     with config_file.open('rb') as f:
         return tomllib.load(f)
+
+
+def deep_merge(target: dict, source: dict) -> dict:
+    """Deep merge two dictionaries."""
+    result = target.copy()
+    for key, value in source.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def load_merged_config(vlfs_dir: Path) -> dict[str, Any]:
+    """Load repo config, then overlay user config."""
+    repo_config = load_config(vlfs_dir)
+    
+    user_config_path = get_user_config_dir() / 'config.toml'
+    user_config = {}
+    if user_config_path.exists():
+        import tomllib
+        with user_config_path.open('rb') as f:
+            user_config = tomllib.load(f)
+            
+    return deep_merge(repo_config, user_config)
 
 
 def hash_file(path: Path) -> tuple[str, int, float]:
@@ -1075,9 +1215,9 @@ def shard_path(hex_digest: str) -> str:
     return f"{hex_lower[:2]}/{hex_lower[2:4]}/{hex_lower}"
 
 
-def compress_bytes(data: bytes) -> bytes:
+def compress_bytes(data: bytes, level: int = 3) -> bytes:
     """Compress data using zstandard."""
-    cctx = zstandard.ZstdCompressor()
+    cctx = zstandard.ZstdCompressor(level=level)
     return cctx.compress(data)
 
 
@@ -1087,7 +1227,7 @@ def decompress_bytes(data: bytes) -> bytes:
     return dctx.decompress(data)
 
 
-def store_object(src_path: Path, cache_dir: Path) -> str:
+def store_object(src_path: Path, cache_dir: Path, compression_level: int = 3) -> str:
     """Store file in cache, return object key."""
     hex_digest, _, _ = hash_file(src_path)
     object_key = shard_path(hex_digest)
@@ -1099,7 +1239,7 @@ def store_object(src_path: Path, cache_dir: Path) -> str:
     
     # Read, compress, and store atomically
     data = src_path.read_bytes()
-    compressed = compress_bytes(data)
+    compressed = compress_bytes(data, level=compression_level)
     
     object_path.parent.mkdir(parents=True, exist_ok=True)
     
@@ -1170,6 +1310,74 @@ def update_index_entries(vlfs_dir: Path, updates: dict[str, dict[str, Any]]) -> 
         write_index(vlfs_dir, index)
 
 
+def write_rclone_r2_config(dest_dir: Path) -> None:
+    """Generate rclone.conf with R2 settings in dest_dir."""
+    # Load config from repo (for provider settings etc)
+    # We assume we are in a repo, so find .vlfs
+    try:
+        vlfs_dir, _ = resolve_paths(Path.cwd())
+        repo_config = load_merged_config(vlfs_dir)
+    except:
+        repo_config = {}
+
+    config_path = dest_dir / 'rclone.conf'
+    
+    # Read existing config if present
+    existing_lines = []
+    if config_path.exists():
+        existing_lines = config_path.read_text().splitlines()
+    
+    new_lines = []
+    in_r2 = False
+    
+    # Copy everything except [r2] section
+    for line in existing_lines:
+        stripped = line.strip()
+        if stripped == '[r2]':
+            in_r2 = True
+            continue
+        if in_r2 and stripped.startswith('['):
+            in_r2 = False
+        
+        if not in_r2:
+            new_lines.append(line)
+    
+    # Add/Update [r2] section
+    r2_config = repo_config.get('remotes', {}).get('r2', {})
+    
+    # Get secrets from env
+    try:
+        env_config = get_r2_config_from_env()
+    except ValueError:
+        # If pushing, we need creds. But this might be called just to ensure config exists.
+        env_config = {}
+    
+    if env_config:
+        new_lines.append('')
+        new_lines.append('[r2]')
+        new_lines.append('type = s3')
+        
+        # Add provider specific settings
+        provider = r2_config.get('provider', 'Cloudflare')
+        new_lines.append(f'provider = {provider}')
+        
+        endpoint = r2_config.get('endpoint')
+        if not endpoint and 'endpoint' in env_config:
+            endpoint = env_config['endpoint']
+        if endpoint:
+            new_lines.append(f'endpoint = {endpoint}')
+
+        new_lines.append(f"access_key_id = {env_config['access_key_id']}")
+        new_lines.append(f"secret_access_key = {env_config['secret_access_key']}")
+        
+        # Write back
+        config_path.write_text('\n'.join(new_lines) + '\n')
+
+
+def update_rclone_config(vlfs_dir: Path) -> None:
+    """Deprecated: Writes R2 config to .vlfs (legacy support)."""
+    write_rclone_r2_config(vlfs_dir)
+
 def compute_status(index: dict[str, Any], repo_root: Path) -> dict[str, list[str]]:
     """Compare workspace against index, return categorized lists."""
     entries = index.get('entries', {})
@@ -1212,8 +1420,33 @@ def compute_status(index: dict[str, Any], repo_root: Path) -> dict[str, list[str
             if current_hash != entry.get('hash'):
                 modified.append(rel_path)
     
-    # Find extra files (not in index but exist)
-    # This is simplified - in practice would scan workspace
+    # Find extra files
+    # Load config for patterns
+    config = load_config(repo_root / '.vlfs')  # Assuming standard location
+    tracking = config.get('tracking', {})
+    patterns = tracking.get('patterns', [])
+    
+    # Default to common large file types if no patterns configured
+    if not patterns:
+        patterns = ['*.psd', '*.zip', '*.exe', '*.dll', '*.lib', '*.iso', '*.mp4']
+
+    ignored_dirs = {'.git', '.vlfs', '.vlfs-cache', '__pycache__', 'node_modules', 'venv', '.env'}
+    
+    for root, dirs, files in os.walk(repo_root):
+        dirs[:] = [d for d in dirs if d not in ignored_dirs]
+        
+        for file in files:
+            file_path = Path(root) / file
+            rel_path = file_path.relative_to(repo_root)
+            rel_str = str(rel_path).replace(os.sep, '/')
+            
+            # Skip if already in index
+            if rel_str in entries:
+                continue
+            
+            # Check if matches tracked patterns
+            if any(fnmatch.fnmatch(file, p) for p in patterns):
+                extra.append(rel_str)
     
     return {'missing': missing, 'modified': modified, 'extra': extra}
 
@@ -1250,16 +1483,17 @@ def cmd_status(repo_root: Path, vlfs_dir: Path, dry_run: bool = False, json_outp
             if len(status['modified']) > 10:
                 print(f"  ... and {len(status['modified']) - 10} more")
         if status['extra']:
-            print(f"{colorize('Extra:', 'GRAY', force_color)} {len(status['extra'])}")
+            print(f"{colorize('Extra (untracked):', 'MAGENTA', force_color)} {len(status['extra'])}")
             for path in status['extra'][:10]:
-                print(f"  {colorize(path, 'GRAY', force_color)}")
+                print(f"  {colorize(path, 'MAGENTA', force_color)}")
             if len(status['extra']) > 10:
                 print(f"  ... and {len(status['extra']) - 10} more")
+            print(f"  (Add with: vlfs push --glob ...)")
     
     return 0
 
 
-def cmd_pull(repo_root: Path, vlfs_dir: Path, cache_dir: Path, dry_run: bool = False) -> int:
+def cmd_pull(repo_root: Path, vlfs_dir: Path, cache_dir: Path, force: bool = False, dry_run: bool = False) -> int:
     """Execute pull command with support for mixed remotes."""
     try:
         index = read_index(vlfs_dir)
@@ -1271,11 +1505,40 @@ def cmd_pull(repo_root: Path, vlfs_dir: Path, cache_dir: Path, dry_run: bool = F
         print("No files to pull (index is empty)")
         return 0
     
+    # Load merged config
+    config = load_merged_config(vlfs_dir)
+    
+    # Check if we can use HTTP download for R2
+    r2_public_url = config.get('remotes', {}).get('r2', {}).get('public_base_url')
+
+    # Update rclone config with R2 settings only if needed (push or no public URL)
+    # But for pull, if we have public URL, we don't strictly need rclone config
+    if not dry_run and not r2_public_url:
+        update_rclone_config(vlfs_dir)
+    
     # Group objects by remote
     remote_groups = group_objects_by_remote(index)
     
+    # Validate connection only if not using HTTP
+    if not dry_run and 'r2' in remote_groups and not r2_public_url:
+        try:
+            validate_r2_connection(bucket='vlfs')
+        except (RcloneError, ValueError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            if isinstance(e, ValueError):
+                print("Hint: Set R2 credentials via RCLONE_CONFIG_R2_* env vars", file=sys.stderr)
+            return 1
+
     total_downloaded = 0
     total_objects = 0
+    
+    # Build map of object key -> compressed size for progress reporting
+    key_sizes = {}
+    for entry in index.get('entries', {}).values():
+        k = entry.get('object_key')
+        s = entry.get('compressed_size', 0)
+        if k:
+            key_sizes[k] = s
     
     for remote, objects in remote_groups.items():
         object_keys = [obj[0] for obj in objects]
@@ -1285,41 +1548,63 @@ def cmd_pull(repo_root: Path, vlfs_dir: Path, cache_dir: Path, dry_run: bool = F
         missing = [key for key in object_keys if not (cache_dir / 'objects' / key).exists()]
         
         if missing:
-            if dry_run:
-                print(f"[DRY-RUN] Would download {len(missing)} objects from {remote}")
-                total_downloaded += len(missing)
+            missing_size = sum(key_sizes.get(k, 0) for k in missing)
+            
+            if remote == 'r2' and r2_public_url:
+                 if dry_run:
+                     print(f"[DRY-RUN] Would download {len(missing)} objects ({format_bytes(missing_size)}) via HTTP from {r2_public_url}")
+                     total_downloaded += len(missing)
+                 else:
+                     print(f"Downloading {len(missing)} objects ({format_bytes(missing_size)}) via HTTP...")
+                     downloaded = download_from_r2_http(missing, cache_dir, r2_public_url, dry_run)
+                     total_downloaded += downloaded
             else:
-                print(f"Downloading {len(missing)} objects from {remote}...")
-                try:
-                    if remote == 'gdrive':
-                        # Check Drive token first
-                        try:
-                            token_ok = has_drive_token(vlfs_dir)
-                        except RuntimeError as e:
-                            print(f"Error: {e}", file=sys.stderr)
-                            print("Set up Drive auth with: vlfs auth gdrive", file=sys.stderr)
-                            logger.warning("Drive unavailable: %s", e)
-                            continue
+                if dry_run:
+                    print(f"[DRY-RUN] Would download {len(missing)} objects ({format_bytes(missing_size)}) from {remote}")
+                    total_downloaded += len(missing)
+                else:
+                    print(f"Downloading {len(missing)} objects ({format_bytes(missing_size)}) from {remote}...")
+                    try:
+                        if remote == 'gdrive':
+                            # Check Drive token in user config dir
+                            user_dir = get_user_config_dir()
+                            token_ok = (user_dir / 'gdrive-token.json').exists()
 
-                        if not token_ok:
-                            print("Error: Google Drive token not found.", file=sys.stderr)
-                            print("Set up Drive auth with: vlfs auth gdrive", file=sys.stderr)
-                            logger.warning("Drive token missing; skipping Drive downloads")
-                            continue
+                            if not token_ok:
+                                # Fallback to local repo .vlfs check (legacy)
+                                try:
+                                    token_ok = has_drive_token(vlfs_dir)
+                                except RuntimeError:
+                                    pass
 
-                        downloaded = download_from_drive(missing, cache_dir, dry_run=False)
-                    else:
-                        # Default to R2
-                        downloaded = download_from_r2(missing, cache_dir, dry_run=False)
-                    total_downloaded += downloaded
-                except (RcloneError, ValueError) as e:
-                    print(f"Error downloading from {remote}: {e}", file=sys.stderr)
-                    if isinstance(e, ValueError):
-                        print("Hint: Set R2 credentials via RCLONE_CONFIG_R2_* env vars", file=sys.stderr)
-                    return 1
+                            if not token_ok:
+                                print("Skipping Drive files (no auth). Run: vlfs auth gdrive", file=sys.stderr)
+                                continue
+
+                            downloaded = download_from_drive(missing, cache_dir, dry_run=False)
+                        else:
+                            # Default to R2 (rclone)
+                            if not r2_public_url:
+                                downloaded = download_from_r2(missing, cache_dir, dry_run=False)
+                            else:
+                                # Should be handled by if block above, but safe fallback
+                                downloaded = download_from_r2_http(missing, cache_dir, r2_public_url, dry_run)
+                        total_downloaded += downloaded
+                    except (RcloneError, ValueError) as e:
+                        print(f"Error downloading from {remote}: {e}", file=sys.stderr)
+                        if isinstance(e, ValueError):
+                            print("Hint: Set R2 credentials via RCLONE_CONFIG_R2_* env vars", file=sys.stderr)
+                        return 1
     
     # Materialize workspace
-    files_written, bytes_written = materialize_workspace(index, repo_root, cache_dir, dry_run)
+    files_written, bytes_written, skipped = materialize_workspace(index, repo_root, cache_dir, force, dry_run)
+    
+    if skipped:
+        print(f"Skipped {len(skipped)} files due to local modifications (use --force to overwrite):")
+        for path in skipped[:10]:
+            print(f"  {path}")
+        if len(skipped) > 10:
+            print(f"  ... and {len(skipped) - 10} more")
     
     if dry_run:
         print(f"[DRY-RUN] Would write {files_written} files ({format_bytes(bytes_written)})")
@@ -1338,6 +1623,26 @@ def cmd_push(
     dry_run: bool = False
 ) -> int:
     """Execute push command. Handles both files and directories."""
+    # Validate connection before starting (unless dry run)
+    if not dry_run and not private:
+        try:
+            get_r2_config_from_env()
+        except ValueError:
+             print("Error: R2 credentials required for push", file=sys.stderr)
+             print("Hint: Set RCLONE_CONFIG_R2_* env vars", file=sys.stderr)
+             return 1
+             
+        # Write rclone config to user dir
+        user_dir = get_user_config_dir()
+        write_rclone_r2_config(user_dir)
+        set_rclone_config_path(user_dir / 'rclone.conf')
+        
+        try:
+            validate_r2_connection(bucket='vlfs')
+        except (RcloneError, ValueError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+
     src_path = Path(path)
     # Resolve relative to repo_root if not absolute
     if not src_path.is_absolute():
@@ -1347,6 +1652,10 @@ def cmd_push(
     if not src_path.exists():
         print(f"Error: File not found: {path}", file=sys.stderr)
         return 1
+        
+    # Load config for compression level
+    config = load_config(vlfs_dir)
+    compression_level = config.get('defaults', {}).get('compression_level', 3)
 
     # Handle directory
     if src_path.is_dir():
@@ -1359,7 +1668,9 @@ def cmd_push(
         failed = []
         updates: dict[str, dict[str, Any]] = {}
         for file_path in files:
-            result, entry = _push_single_file_collect(repo_root, vlfs_dir, cache_dir, file_path, private, dry_run)
+            result, entry = _push_single_file_collect(
+                repo_root, vlfs_dir, cache_dir, file_path, private, dry_run, compression_level
+            )
             if result != 0:
                 failed.append(str(file_path.relative_to(repo_root)))
             elif entry:
@@ -1374,7 +1685,9 @@ def cmd_push(
         return 0
 
     # Handle single file
-    result, entry = _push_single_file_collect(repo_root, vlfs_dir, cache_dir, src_path, private, dry_run)
+    result, entry = _push_single_file_collect(
+        repo_root, vlfs_dir, cache_dir, src_path, private, dry_run, compression_level
+    )
     if not dry_run and entry:
         update_index_entries(vlfs_dir, entry)
     return result
@@ -1386,7 +1699,8 @@ def _push_single_file_collect(
     cache_dir: Path,
     src_path: Path,
     private: bool,
-    dry_run: bool
+    dry_run: bool,
+    compression_level: int = 3
 ) -> tuple[int, dict[str, dict[str, Any]] | None]:
     """Push a single file to remote and return index entry update."""
     # Ensure file is within repo
@@ -1400,7 +1714,7 @@ def _push_single_file_collect(
     logger.debug(f"Source path: {src_path}")
 
     # Store in local cache
-    object_key = store_object(src_path, cache_dir)
+    object_key = store_object(src_path, cache_dir, compression_level=compression_level)
     logger.debug(f"Stored in cache with key: {object_key}")
 
     # Compute hash and size
@@ -1652,6 +1966,10 @@ def cmd_push_all(repo_root: Path, vlfs_dir: Path, cache_dir: Path, private: bool
         print("All files are up to date")
         return 0
     
+    # Load config for compression level
+    config = load_config(vlfs_dir)
+    compression_level = config.get('defaults', {}).get('compression_level', 3)
+
     print(f"Pushing {len(files_to_push)} files...")
     
     failed = []
@@ -1661,7 +1979,9 @@ def cmd_push_all(repo_root: Path, vlfs_dir: Path, cache_dir: Path, private: bool
         if not file_path.exists():
             continue
         
-        result, entry = _push_single_file_collect(repo_root, vlfs_dir, cache_dir, file_path, private, dry_run)
+        result, entry = _push_single_file_collect(
+            repo_root, vlfs_dir, cache_dir, file_path, private, dry_run, compression_level
+        )
         if result != 0:
             failed.append(rel_path)
         elif entry:
@@ -1734,10 +2054,16 @@ def cmd_push_glob(repo_root: Path, vlfs_dir: Path, cache_dir: Path, pattern: str
     
     print(f"Found {len(matched_files)} files matching '{pattern}'")
     
+    # Load config for compression level
+    config = load_config(vlfs_dir)
+    compression_level = config.get('defaults', {}).get('compression_level', 3)
+
     failed = []
     updates: dict[str, dict[str, Any]] = {}
     for file_path in matched_files:
-        result, entry = _push_single_file_collect(repo_root, vlfs_dir, cache_dir, file_path, private, dry_run)
+        result, entry = _push_single_file_collect(
+            repo_root, vlfs_dir, cache_dir, file_path, private, dry_run, compression_level
+        )
         if result != 0:
             failed.append(str(file_path.relative_to(repo_root)))
         elif entry:

@@ -276,6 +276,8 @@ class TestCmdPullMixedRemotes:
     
     def test_pulls_from_both_remotes(self, repo_root, monkeypatch):
         """Should pull from both R2 and Drive."""
+        monkeypatch.setattr(vlfs, 'validate_r2_connection', lambda *args, **kwargs: True)
+
         # Create Drive token
         (repo_root / '.vlfs' / 'gdrive-token.json').write_text('{"token": "test"}')
         
@@ -305,7 +307,7 @@ class TestCmdPullMixedRemotes:
         monkeypatch.setattr(vlfs, 'download_from_drive', mock_drive_download)
         
         # Mock materialize to skip actual file writing
-        monkeypatch.setattr(vlfs, 'materialize_workspace', lambda *args, **kwargs: (0, 0))
+        monkeypatch.setattr(vlfs, 'materialize_workspace', lambda *args, **kwargs: (0, 0, []))
         
         monkeypatch.chdir(repo_root)
         result = vlfs.main(['pull'])
@@ -316,6 +318,7 @@ class TestCmdPullMixedRemotes:
     
     def test_skips_drive_in_ci(self, repo_root, monkeypatch):
         """Should skip Drive downloads in CI."""
+        monkeypatch.setattr(vlfs, 'validate_r2_connection', lambda *args, **kwargs: True)
         monkeypatch.setenv('CI', 'true')
         
         # Create index with Drive file
@@ -328,7 +331,7 @@ class TestCmdPullMixedRemotes:
         vlfs.write_index(repo_root / '.vlfs', index)
         
         # Mock materialize
-        monkeypatch.setattr(vlfs, 'materialize_workspace', lambda *args, **kwargs: (0, 0))
+        monkeypatch.setattr(vlfs, 'materialize_workspace', lambda *args, **kwargs: (0, 0, []))
         
         monkeypatch.chdir(repo_root)
         result = vlfs.main(['pull'])

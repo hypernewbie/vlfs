@@ -163,3 +163,11 @@ exit 0
     monkeypatch.setenv('PATH', str(tmp_path) + os.pathsep + os.environ.get('PATH', ''))
     
     return rclone_path
+
+
+@pytest.fixture(autouse=True)
+def mock_r2_creds(monkeypatch: Any) -> None:
+    """Set dummy R2 credentials for all tests."""
+    monkeypatch.setenv('RCLONE_CONFIG_R2_ACCESS_KEY_ID', 'test_key')
+    monkeypatch.setenv('RCLONE_CONFIG_R2_SECRET_ACCESS_KEY', 'test_secret')
+    monkeypatch.setenv('RCLONE_CONFIG_R2_ENDPOINT', 'https://test.r2.cloudflarestorage.com')

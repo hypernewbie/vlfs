@@ -88,6 +88,7 @@ class TestLogFile:
         fake_home = tmp_path / 'home'
         fake_home.mkdir()
         monkeypatch.setenv('HOME', str(fake_home))
+        monkeypatch.setenv('USERPROFILE', str(fake_home))
         
         test_file = repo_root / 'test.txt'
         test_file.write_text('content')
@@ -107,6 +108,7 @@ class TestLogFile:
         fake_home = tmp_path / 'home'
         fake_home.mkdir()
         monkeypatch.setenv('HOME', str(fake_home))
+        monkeypatch.setenv('USERPROFILE', str(fake_home))
         
         test_file = repo_root / 'test.txt'
         test_file.write_text('content')
@@ -128,6 +130,7 @@ class TestLogFile:
         fake_home = tmp_path / 'home'
         fake_home.mkdir()
         monkeypatch.setenv('HOME', str(fake_home))
+        monkeypatch.setenv('USERPROFILE', str(fake_home))
         
         test_file = repo_root / 'test.txt'
         test_file.write_text('content')
