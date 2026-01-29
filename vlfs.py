@@ -1201,8 +1201,6 @@ def main(argv: list[str] | None = None) -> int:
 
     if user_config_path.exists():
         set_rclone_config_path(user_config_path)
-    elif legacy_config_path.exists():
-        set_rclone_config_path(legacy_config_path)
     else:
         set_rclone_config_path(None)
 
@@ -1284,9 +1282,6 @@ def ensure_gitignore(repo_root: Path) -> None:
 
     required_entries = [
         ".vlfs-cache/",
-        # Legacy/fallback ignores just in case
-        ".vlfs/gdrive-token.json",
-        ".vlfs/rclone.conf",
     ]
 
     existing_content = ""
@@ -1727,8 +1722,6 @@ def cmd_pull(
 
     # Update rclone config with R2 settings only if needed (push or no public URL)
     # But for pull, if we have public URL, we don't strictly need rclone config
-    if not dry_run and not r2_public_url:
-        update_rclone_config(vlfs_dir)
 
     # Group objects by remote
     remote_groups = group_objects_by_remote(index)
