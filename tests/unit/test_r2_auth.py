@@ -115,25 +115,6 @@ class TestR2Auth:
         # Set up env vars without endpoint
         monkeypatch.setenv("RCLONE_CONFIG_R2_ACCESS_KEY_ID", "key")
         monkeypatch.setenv("RCLONE_CONFIG_R2_SECRET_ACCESS_KEY", "secret")
-        # Ensure endpoint is unset (might be set by autouse fixture)
-        # However, get_r2_config_from_env REQUIRES endpoint in 'required' list...
-        # Wait, get_r2_config_from_env requires endpoint?
-        # Let's check vlfs.py: required = [..., RCLONE_CONFIG_R2_ENDPOINT]
-        # Yes, it is required.
-        # So this test case implies we want to succeed if endpoint is present, but maybe not use it?
-        # Actually strict behavior says it raises ValueError if missing.
-        # But if the test intent is "write config even if endpoint env var is present but maybe empty?"
-        # If get_r2_config_from_env raises ValueError for missing endpoint, then write_rclone_r2_config fails.
-        # Unless the test sets up env vars such that get_r2_config_from_env succeeds?
-        # The original test set it to "https://example.com".
-
-        # If I want to test "without endpoint in config file"?
-        # But get_r2_config_from_env collects it.
-        # And write_rclone_r2_config usage: if "endpoint" in r2_config: append...
-        # So if get_r2_config_from_env returns it, it is added.
-        # Can get_r2_config_from_env return it as None? No, only present strings.
-
-        # I'll stick to what the original test likely intended: valid env vars.
         monkeypatch.setenv("RCLONE_CONFIG_R2_ENDPOINT", "http://example.com")
 
         # Write config
