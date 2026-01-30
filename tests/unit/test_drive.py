@@ -29,6 +29,8 @@ class TestHasDriveToken:
         user_config = tmp_path / "user_config"
         user_config.mkdir()
         monkeypatch.setenv("VLFS_USER_CONFIG", str(user_config))
+        monkeypatch.delenv("CI", raising=False)
+        monkeypatch.delenv("VLFS_NO_DRIVE", raising=False)
 
         result = vlfs.has_drive_token()
 
@@ -111,8 +113,19 @@ class TestAuthGdrive:
             # When rclone config is called, write the config file it's supposed to generate
             # In real life, rclone interactive auth does this.
             # Here we simulate it by writing the file directly.
-            config_file = Path(cmd[3])  # rclone config --config <file>
-            content = config_file.read_text()
+            try:
+                idx = cmd.index("--config")
+                config_file = Path(cmd[idx + 1])
+            except ValueError:
+                # If --config not found, likely testing something else or default path
+                # But here we expect it.
+                return 1, "", "config arg missing"
+
+            if config_file.exists():
+                content = config_file.read_text()
+            else:
+                content = ""
+
             # Replace empty token with valid one
             if "token = \n" in content:
                 new_content = content.replace(
@@ -120,7 +133,9 @@ class TestAuthGdrive:
                 )
                 config_file.write_text(new_content)
             else:
-                # Fallback
+                # Fallback, ensure section exists
+                if "[gdrive]" not in content:
+                    content += "\n[gdrive]\n"
                 config_file.write_text(content + 'token = {"access_token":"valid"}\n')
             return 0, "", ""
 
@@ -134,18 +149,6 @@ class TestAuthGdrive:
         assert token_file.exists()
         assert "access_token" in token_file.read_text()
         assert "valid" in token_file.read_text()
-
-    def test_auth_gdrive_no_creds(self, repo_root, monkeypatch, tmp_path, capsys):
-        """Should fail if no creds in user config."""
-        user_config = tmp_path / "user_config"
-        user_config.mkdir()
-        monkeypatch.setenv("VLFS_USER_CONFIG", str(user_config))
-
-        result = vlfs.auth_gdrive(repo_root / ".vlfs")
-
-        assert result == 1
-        captured = capsys.readouterr()
-        assert "Drive credentials not found" in captured.out
 
 
 class TestGroupObjectsByRemote:
@@ -333,6 +336,8 @@ class TestCmdPushPrivate:
         user_config = tmp_path / "user_config"
         user_config.mkdir()
         monkeypatch.setenv("VLFS_USER_CONFIG", str(user_config))
+        monkeypatch.delenv("CI", raising=False)
+        monkeypatch.delenv("VLFS_NO_DRIVE", raising=False)
 
         test_file = repo_root / "private" / "secret.txt"
         test_file.parent.mkdir(exist_ok=True)

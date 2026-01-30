@@ -26,6 +26,19 @@ jobs:
             requirements.txt
             requirements-dev.txt
 
+      - name: Install Rclone (Windows)
+        if: runner.os == 'Windows'
+        run: choco install rclone
+
+      - name: Install Rclone (macOS)
+        if: runner.os == 'macOS'
+        run: brew install rclone
+
+      - name: Install Rclone (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo -v ; curl https://rclone.org/install.sh | sudo bash
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
