@@ -1,6 +1,8 @@
-# VLFS
+# Vlfs
 
-Single-script Git LFS alternative. Public files via HTTP, private files via Google Drive.
+AI Slop single-script Python script Git LFS alternative. Public files via HTTP, private files via Google Drive.
+
+> Vlfs is vibe coded by AI with only minor review. It's intended to be a throaway script. Do not use.
 
 ## Quick Start
 
@@ -58,27 +60,13 @@ public_base_url = "https://pub-abc123.r2.dev/vlfs"
 compression_level = 3
 ```
 
-`~/.config/vlfs/config.toml` (local secrets):
-```toml
-[drive]
-client_id = "YOUR_CLIENT_ID"
-client_secret = "YOUR_CLIENT_SECRET"
-```
-
-## Environment Variables (Push Only)
-
-| Variable | Purpose |
-|----------|---------|
-| `RCLONE_CONFIG_R2_ACCESS_KEY_ID` | R2 access key |
-| `RCLONE_CONFIG_R2_SECRET_ACCESS_KEY` | R2 secret key |
-| `RCLONE_CONFIG_R2_ENDPOINT` | R2 endpoint |
-
 ## Google Drive Setup
 
 ```bash
-# Add credentials to ~/.config/vlfs/config.toml first
 python vlfs.py auth gdrive
 ```
+
+This opens a browser for you to authorise access. Done.
 
 ## CMake Integration
 

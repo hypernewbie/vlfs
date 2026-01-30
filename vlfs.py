@@ -1,4 +1,4 @@
-"""VLFS - Virtual Large File Storage CLI."""
+"""VLFS - Vibecoded Large File Storage CLI."""
 
 import argparse
 import fnmatch
@@ -24,7 +24,11 @@ logger = logging.getLogger("vlfs")
 _RCLONE_CONFIG_PATH: Path | None = None
 
 
-# Custom Exceptions
+# =============================================================================
+# Exceptions
+# =============================================================================
+
+
 class RcloneError(Exception):
     """Error from rclone subprocess."""
 
@@ -43,7 +47,11 @@ class VLFSIndexError(Exception):
     """Error in index operations."""
 
 
-# ANSI color codes
+# =============================================================================
+# Output Helpers
+# =============================================================================
+
+
 class Colors:
     """ANSI color codes for terminal output."""
 
@@ -135,6 +143,11 @@ def die(message: str, hint: str | None = None, exit_code: int = 1) -> int:
     return exit_code
 
 
+# =============================================================================
+# Logging
+# =============================================================================
+
+
 def setup_logging(verbosity: int = 0, log_file: bool = True) -> None:
     """Set up logging with console and file handlers.
 
@@ -177,6 +190,11 @@ def setup_logging(verbosity: int = 0, log_file: bool = True) -> None:
         logger.addHandler(file_handler)
 
         logger.debug(f"Logging initialized (verbosity={verbosity})")
+
+
+# =============================================================================
+# Low-level Utilities
+# =============================================================================
 
 
 class FileLock:
@@ -284,6 +302,11 @@ def retry(
     raise last_exception
 
 
+# =============================================================================
+# Hashing & Compression
+# =============================================================================
+
+
 def hash_file(path: Path) -> tuple[str, int, float]:
     """Compute SHA256 hash of file, return (hex_digest, size, mtime)."""
     sha256 = hashlib.sha256()
@@ -352,6 +375,11 @@ def decompress_bytes(data: bytes) -> bytes:
     return dctx.decompress(data)
 
 
+# =============================================================================
+# Cache Operations
+# =============================================================================
+
+
 def store_object(src_path: Path, cache_dir: Path, compression_level: int = 3) -> str:
     """Store file in cache, return object key."""
     hex_digest, _, _ = hash_file(src_path)
@@ -376,6 +404,11 @@ def load_object(object_key: str, cache_dir: Path) -> bytes:
     object_path = cache_dir / "objects" / object_key
     compressed = object_path.read_bytes()
     return decompress_bytes(compressed)
+
+
+# =============================================================================
+# Index Operations
+# =============================================================================
 
 
 def read_index(vlfs_dir: Path) -> dict[str, Any]:
@@ -411,6 +444,11 @@ def update_index_entries(vlfs_dir: Path, updates: dict[str, dict[str, Any]]) -> 
         index_entries.update(updates)
         index["entries"] = index_entries
         write_index(vlfs_dir, index)
+
+
+# =============================================================================
+# Configuration
+# =============================================================================
 
 
 def get_user_config_dir() -> Path:
@@ -529,6 +567,11 @@ def warn_if_secrets_in_repo(vlfs_dir: Path) -> None:
         print("Move secrets to ~/.config/vlfs/config.toml", file=sys.stderr)
 
 
+# =============================================================================
+# Rclone
+# =============================================================================
+
+
 def set_rclone_config_path(path: Path | None) -> None:
     """Set global rclone config path for this run."""
     global _RCLONE_CONFIG_PATH
@@ -619,7 +662,6 @@ def write_rclone_drive_config(config_dir: Path, config: dict[str, str]) -> None:
         config: Dict with client_id, client_secret, etc.
     """
     config_path = config_dir / "rclone.conf"
-
     config_lines = ["[gdrive]", "type = drive"]
 
     for key, value in config.items():
@@ -690,6 +732,11 @@ def write_rclone_r2_config(dest_dir: Path) -> None:
 
         # Write back
         atomic_write_text(config_path, "\n".join(new_lines) + "\n")
+
+
+# =============================================================================
+# R2 Operations
+# =============================================================================
 
 
 def get_r2_config_from_env() -> dict[str, str]:
@@ -957,6 +1004,11 @@ def download_from_r2_http(
     return downloaded
 
 
+# =============================================================================
+# Google Drive Operations
+# =============================================================================
+
+
 def has_drive_token() -> bool:
     """Check if Google Drive token exists.
 
@@ -983,7 +1035,7 @@ def has_drive_token() -> bool:
 
 
 def auth_gdrive(vlfs_dir: Path) -> int:
-    """Interactive Google Drive authentication.
+    """Interactive Google Drive authentication using rclone's built-in OAuth.
 
     Args:
         vlfs_dir: Path to .vlfs directory (unused, kept for compat)
@@ -992,62 +1044,28 @@ def auth_gdrive(vlfs_dir: Path) -> int:
         Exit code (0 for success)
     """
     user_dir = get_user_config_dir()
-
-    print("Setting up Google Drive authentication...")
-    print()
-    print("You'll need to create OAuth2 credentials from Google Cloud Console:")
-    print("1. Go to https://console.cloud.google.com/")
-    print("2. Create a project or select existing")
-    print("3. Enable Google Drive API")
-    print("4. Create OAuth2 credentials (Desktop app)")
-    print("5. Note the Client ID and Client Secret")
-    print()
-
-    # Read client credentials from user config
-    user_config_path = user_dir / "config.toml"
-    user_config = {}
-    if user_config_path.exists():
-        import tomllib
-
-        with user_config_path.open("rb") as f:
-            user_config = tomllib.load(f)
-
-    client_id = user_config.get("drive", {}).get("client_id")
-    client_secret = user_config.get("drive", {}).get("client_secret")
-
-    if not client_id or not client_secret:
-        print(f"Error: Drive credentials not found in {user_config_path}")
-        print()
-        print(f"Add the following to {user_config_path}:")
-        print()
-        print("[drive]")
-        print('client_id = "YOUR_CLIENT_ID"')
-        print('client_secret = "YOUR_CLIENT_SECRET"')
-        return 1
-
-    # Write rclone config to user dir
-    write_rclone_drive_config(
-        user_dir,
-        {
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "scope": "drive",
-            "token": "",  # Will be populated by rclone
-        },
-    )
-
     config_file = user_dir / "rclone.conf"
     token_file = user_dir / "gdrive-token.json"
 
-    print(f"Running rclone config...")
-    print(f"Config file: {config_file}")
-    print()
-    print("Follow the prompts to authenticate with Google.")
+    print("Setting up Google Drive authentication...")
+    print("A browser will open for you to authorise access to Google Drive.")
     print()
 
     try:
-        # Use rclone config to set up the remote
-        subprocess.run(["rclone", "config", "--config", str(config_file)], check=True)
+        # Use rclone config create with built-in OAuth
+        # This creates a remote named 'gdrive' of type 'drive'
+        subprocess.run(
+            [
+                "rclone",
+                "config",
+                "create",
+                "gdrive",
+                "drive",
+                "--config",
+                str(config_file),
+            ],
+            check=True,
+        )
 
         # Extract token from generated config
         import configparser
@@ -1073,12 +1091,14 @@ def auth_gdrive(vlfs_dir: Path) -> int:
         print("Google Drive authentication complete!")
         print(f"Token saved to: {token_file}")
         return 0
+
     except subprocess.CalledProcessError as e:
-        print(f"Error during authentication: {e}", file=sys.stderr)
-        return 1
+        return die("rclone auth failed", hint=str(e))
     except FileNotFoundError:
-        print("Error: rclone not found in PATH", file=sys.stderr)
-        return 1
+        return die(
+            "rclone not found in PATH",
+            hint="Install from https://rclone.org/downloads/",
+        )
 
 
 def upload_to_drive(
@@ -1191,6 +1211,11 @@ def download_from_drive(
         return len(object_keys)
     finally:
         os.unlink(files_from_path)
+
+
+# =============================================================================
+# Workspace Operations
+# =============================================================================
 
 
 def compute_missing_objects(index: dict[str, Any], cache_dir: Path) -> list[str]:
@@ -1407,6 +1432,11 @@ def group_objects_by_remote(index: dict[str, Any]) -> dict[str, list[tuple[str, 
         groups[remote].append((object_key, rel_path))
 
     return groups
+
+
+# =============================================================================
+# Commands
+# =============================================================================
 
 
 def cmd_status(
@@ -1919,6 +1949,11 @@ def cmd_clean(
     return 0
 
 
+# =============================================================================
+# Private Helpers
+# =============================================================================
+
+
 def _push_single_file_collect(
     repo_root: Path,
     vlfs_dir: Path,
@@ -2176,10 +2211,15 @@ def _cleanup_empty_dirs(directory: Path) -> None:
                 pass
 
 
+# =============================================================================
+# CLI Entry Point
+# =============================================================================
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        prog="vlfs", description="Virtual Large File Storage", exit_on_error=False
+        prog="vlfs", description="Vibecoded Large File Storage", exit_on_error=False
     )
 
     # Global options
