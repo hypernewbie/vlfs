@@ -10,8 +10,6 @@ AI Slop single-script Python script Git LFS alternative. Public files via HTTP, 
 ## Quick Start
 
 ```bash
-# Clone and pull — no setup required
-git clone <repo>
 python vlfs.py pull
 ```
 
