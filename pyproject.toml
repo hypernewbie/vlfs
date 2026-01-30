@@ -9,6 +9,7 @@ description = "Vibecoded Large File Storage - A simplified Git LFS replacement"
 requires-python = ">=3.10"
 dependencies = [
     "zstandard",
+    "filelock",
     "tomli; python_version < '3.11'",
 ]
 

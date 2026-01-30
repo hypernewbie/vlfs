@@ -1,4 +1,25 @@
-"""VLFS - Vibecoded Large File Storage CLI."""
+"""
+VLFS - Vibecoded Large File Storage CLI
+
+Copyright 2026 UAA Software
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the “Software”), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+"""
 
 import argparse
 import fnmatch
@@ -15,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 import zstandard
+from filelock import FileLock as _FileLock
 
 
 # Module-level logger
@@ -197,49 +219,20 @@ def setup_logging(verbosity: int = 0, log_file: bool = True) -> None:
 # =============================================================================
 
 
-class FileLock:
-    """Cross-platform file lock using flock (Unix) or msvcrt (Windows)."""
+def with_file_lock(path: Path, timeout: float = 10.0):
+    """Context manager for cross-platform file locking.
 
-    def __init__(self, path: Path):
-        self.path = path
-        self._lockfile = None
-        self._handle = None
+    Uses the filelock package for robust locking with timeout support.
 
-    def __enter__(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._lockfile = open(self.path, "w")
+    Args:
+        path: Path to lock file
+        timeout: Seconds to wait for lock (default 10s, -1 for infinite)
 
-        if sys.platform == "win32":
-            import msvcrt
-
-            self._handle = self._lockfile.fileno()
-            # Lock the entire file (blocking)
-            msvcrt.locking(self._handle, msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(self._lockfile.fileno(), fcntl.LOCK_EX)
-
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self._lockfile:
-            if sys.platform == "win32":
-                import msvcrt
-
-                if self._handle:
-                    msvcrt.locking(self._handle, msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(self._lockfile.fileno(), fcntl.LOCK_UN)
-
-            self._lockfile.close()
-
-
-def with_file_lock(path: Path):
-    """Context manager for file locking."""
-    return FileLock(path)
+    Returns:
+        Context manager that acquires/releases lock
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return _FileLock(path, timeout=timeout)
 
 
 def atomic_write_bytes(dest: Path, data: bytes) -> None:

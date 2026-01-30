@@ -175,3 +175,30 @@ def mock_r2_creds(monkeypatch: Any) -> None:
     monkeypatch.setenv(
         "RCLONE_CONFIG_R2_ENDPOINT", "https://test.r2.cloudflarestorage.com"
     )
+
+
+@pytest.fixture(autouse=True)
+def block_real_subprocess(monkeypatch: Any) -> None:
+    """Block real subprocess calls to prevent CI hangs.
+
+    Tests that need subprocess must use rclone_mock fixture which
+    overrides this with a proper mock.
+    """
+    original_run = subprocess.run
+
+    def guarded_run(*args: Any, **kwargs: Any) -> Any:
+        cmd = args[0] if args else kwargs.get("args", [])
+        if cmd and len(cmd) > 0 and "rclone" in str(cmd[0]).lower():
+            # Return a fake success for rclone commands
+            class FakeResult:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            return FakeResult()
+        return original_run(*args, **kwargs)
+
+    # Patch subprocess.run in the vlfs module
+    import vlfs
+
+    monkeypatch.setattr("vlfs.subprocess.run", guarded_run)
