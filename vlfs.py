@@ -521,7 +521,10 @@ def load_config(vlfs_dir: Path) -> dict[str, Any]:
     if not config_file.exists():
         return {}
 
-    import tomllib
+    try:
+        import tomllib
+    except ImportError:
+        import tomli as tomllib
 
     with config_file.open("rb") as f:
         return tomllib.load(f)

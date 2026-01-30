@@ -5,10 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "vlfs"
 version = "0.1.0"
-description = "Virtual Large File Storage - A simplified Git LFS replacement"
+description = "Vibecoded Large File Storage - A simplified Git LFS replacement"
 requires-python = ">=3.10"
 dependencies = [
     "zstandard",
+    "tomli; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
