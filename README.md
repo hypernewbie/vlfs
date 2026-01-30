@@ -1,5 +1,8 @@
 # Vlfs
 
+[![Download vlfs.py](https://img.shields.io/badge/Download-vlfs.py-blue?logo=python)](https://raw.githubusercontent.com/hypernewbie/vlfs/main/vlfs.py)
+[![CI](https://github.com/hypernewbie/vlfs/actions/workflows/ci.yml/badge.svg)](https://github.com/hypernewbie/vlfs/actions/workflows/ci.yml)
+
 AI Slop single-script Python script Git LFS alternative. Public files via HTTP, private files via Google Drive.
 
 > Vlfs is vibe coded by AI with only minor review. It's intended to be a throaway script. Do not use.
