@@ -1514,6 +1514,8 @@ def cmd_pull(
 
     # Check if we can use HTTP download for R2
     r2_public_url = config.get("remotes", {}).get("r2", {}).get("public_base_url")
+    r2_bucket = config.get("remotes", {}).get("r2", {}).get("bucket", "vlfs")
+    drive_bucket = config.get("remotes", {}).get("gdrive", {}).get("bucket", "vlfs")
 
     # Update rclone config with R2 settings only if needed (push or no public URL)
     # But for pull, if we have public URL, we don't strictly need rclone config
@@ -1524,7 +1526,7 @@ def cmd_pull(
     # Validate connection only if not using HTTP
     if not dry_run and "r2" in remote_groups and not r2_public_url:
         try:
-            validate_r2_connection(bucket="vlfs")
+            validate_r2_connection(bucket=r2_bucket)
         except (RcloneError, ConfigError) as e:
             print(f"Error: {e}", file=sys.stderr)
             if isinstance(e, ConfigError):
@@ -1557,6 +1559,8 @@ def cmd_pull(
                 key_sizes,
                 r2_public_url,
                 dry_run,
+                r2_bucket=r2_bucket,
+                drive_bucket=drive_bucket,
             )
         except (RcloneError, ConfigError) as e:
             print(f"Error downloading from {remote}: {e}", file=sys.stderr)
@@ -1602,13 +1606,18 @@ def cmd_push(
     dry_run: bool = False,
 ) -> int:
     """Execute push command. Handles both files and directories."""
+    # Load merged config
+    config = load_merged_config(vlfs_dir)
+    r2_bucket = config.get("remotes", {}).get("r2", {}).get("bucket", "vlfs")
+    drive_bucket = config.get("remotes", {}).get("gdrive", {}).get("bucket", "vlfs")
+
     # Validate connection before starting (unless dry run)
     if not dry_run and not private:
         if ensure_r2_auth() != 0:
             return 1
 
         try:
-            validate_r2_connection(bucket="vlfs")
+            validate_r2_connection(bucket=r2_bucket)
         except (RcloneError, ConfigError) as e:
             print(f"Error: {e}", file=sys.stderr)
             return 1
@@ -1624,7 +1633,6 @@ def cmd_push(
         return 1
 
     # Load config for compression level
-    config = load_config(vlfs_dir)
     compression_level = config.get("defaults", {}).get("compression_level", 3)
 
     # Handle directory
@@ -1646,6 +1654,8 @@ def cmd_push(
                 private,
                 dry_run,
                 compression_level,
+                r2_bucket=r2_bucket,
+                drive_bucket=drive_bucket,
             )
             if result != 0:
                 failed.append(str(file_path.relative_to(repo_root)))
@@ -1662,7 +1672,15 @@ def cmd_push(
 
     # Handle single file
     result, entry = _push_single_file_collect(
-        repo_root, vlfs_dir, cache_dir, src_path, private, dry_run, compression_level
+        repo_root,
+        vlfs_dir,
+        cache_dir,
+        src_path,
+        private,
+        dry_run,
+        compression_level,
+        r2_bucket=r2_bucket,
+        drive_bucket=drive_bucket,
     )
     if not dry_run and entry:
         update_index_entries(vlfs_dir, entry)
@@ -1688,8 +1706,10 @@ def cmd_push_all(
         return 0
 
     # Load config for compression level
-    config = load_config(vlfs_dir)
+    config = load_merged_config(vlfs_dir)
     compression_level = config.get("defaults", {}).get("compression_level", 3)
+    r2_bucket = config.get("remotes", {}).get("r2", {}).get("bucket", "vlfs")
+    drive_bucket = config.get("remotes", {}).get("gdrive", {}).get("bucket", "vlfs")
 
     print(f"Pushing {len(files_to_push)} files...")
 
@@ -1708,6 +1728,8 @@ def cmd_push_all(
             private,
             dry_run,
             compression_level,
+            r2_bucket=r2_bucket,
+            drive_bucket=drive_bucket,
         )
         if result != 0:
             failed.append(rel_path)
@@ -1743,8 +1765,10 @@ def cmd_push_glob(
     print(f"Found {len(matched_files)} files matching '{pattern}'")
 
     # Load config for compression level
-    config = load_config(vlfs_dir)
+    config = load_merged_config(vlfs_dir)
     compression_level = config.get("defaults", {}).get("compression_level", 3)
+    r2_bucket = config.get("remotes", {}).get("r2", {}).get("bucket", "vlfs")
+    drive_bucket = config.get("remotes", {}).get("gdrive", {}).get("bucket", "vlfs")
 
     failed = []
     updates: dict[str, dict[str, Any]] = {}
@@ -1757,6 +1781,8 @@ def cmd_push_glob(
             private,
             dry_run,
             compression_level,
+            r2_bucket=r2_bucket,
+            drive_bucket=drive_bucket,
         )
         if result != 0:
             failed.append(str(file_path.relative_to(repo_root)))
@@ -1958,6 +1984,8 @@ def _push_single_file_collect(
     private: bool,
     dry_run: bool,
     compression_level: int = 3,
+    r2_bucket: str = "vlfs",
+    drive_bucket: str = "vlfs",
 ) -> tuple[int, dict[str, dict[str, Any]] | None]:
     """Push a single file to remote and return index entry update."""
     # Ensure file is within repo
@@ -1998,12 +2026,18 @@ def _push_single_file_collect(
                     return 1, None
 
                 upload_to_drive(
-                    cache_dir / "objects" / object_key, object_key, dry_run=False
+                    cache_dir / "objects" / object_key,
+                    object_key,
+                    bucket=drive_bucket,
+                    dry_run=False,
                 )
                 logger.info(f"Uploaded to Drive: {rel_path}")
             else:
                 upload_to_r2(
-                    cache_dir / "objects" / object_key, object_key, dry_run=False
+                    cache_dir / "objects" / object_key,
+                    object_key,
+                    bucket=r2_bucket,
+                    dry_run=False,
                 )
                 logger.info(f"Uploaded to R2: {rel_path}")
             print(
@@ -2037,6 +2071,8 @@ def _download_remote_group(
     key_sizes: dict[str, int],
     r2_public_url: str | None,
     dry_run: bool,
+    r2_bucket: str = "vlfs",
+    drive_bucket: str = "vlfs",
 ) -> int:
     """Download missing objects for a remote group and return count."""
     missing = [key for key in object_keys if not (cache_dir / "objects" / key).exists()]
@@ -2082,11 +2118,13 @@ def _download_remote_group(
             )
             return 0
 
-        return download_from_drive(missing, cache_dir, dry_run=False)
+        return download_from_drive(
+            missing, cache_dir, bucket=drive_bucket, dry_run=False
+        )
 
     # Default to R2 (rclone)
     if not r2_public_url:
-        return download_from_r2(missing, cache_dir, dry_run=False)
+        return download_from_r2(missing, cache_dir, bucket=r2_bucket, dry_run=False)
 
     # Fallback to HTTP if configured
     return download_from_r2_http(missing, cache_dir, r2_public_url, dry_run)

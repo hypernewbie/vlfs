@@ -56,6 +56,10 @@ python vlfs.py clean
 ```toml
 [remotes.r2]
 public_base_url = "https://pub-abc123.r2.dev/vlfs"
+bucket = "my-project-assets"  # Optional (default: "vlfs")
+
+[remotes.gdrive]
+bucket = "my-project-drive-root" # Optional (default: "vlfs")
 
 [defaults]
 compression_level = 3
@@ -84,6 +88,17 @@ set(VLFSSYNC_AUTO ON)  # Auto-pull on configure
 | `pull` (Drive) | Token | rclone |
 | `push` (R2) | Env vars | rclone |
 | `push --private` | Token | rclone |
+
+## FAQ
+
+**How does sharding work?**
+It uses **directory sharding** to keep folders clean (`vlfs/ab/cd/hash`), not file chunking. One local file equals one cloud object.
+
+**What compression is used?**
+Zstandard (zstd) level 3. It's extremely fast for real-time compression and makes decompression feel instant.
+
+**Is it multithreaded?**
+Mostly. Hashing and downloading (HTTP/Rclone) are parallel/multithreaded. Uploading is currently sequential. Google Drive transfers are single-threaded to respect API rate limits.
 
 ## Dependencies
 
