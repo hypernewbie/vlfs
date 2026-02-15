@@ -73,6 +73,29 @@ python vlfs.py auth gdrive
 
 This opens a browser for you to authorise access. Done.
 
+## Cloudflare R2 Setup
+
+The CLI uses environment variables for authentication. Set these in your shell (or `.env` file):
+
+```bash
+export RCLONE_CONFIG_R2_ACCESS_KEY_ID="your-access-key"
+export RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="your-secret-key"
+export RCLONE_CONFIG_R2_ENDPOINT="https://<accountid>.r2.cloudflarestorage.com"
+```
+
+### Persistent Config (Optional)
+
+If you prefer not to use environment variables, you can create a persistent config file at `~/.config/vlfs/rclone.conf`:
+
+```ini
+[r2]
+type = s3
+provider = Cloudflare
+access_key_id = your-access-key
+secret_access_key = your-secret-key
+endpoint = https://<accountid>.r2.cloudflarestorage.com
+```
+
 ## CMake Integration
 
 ```cmake
