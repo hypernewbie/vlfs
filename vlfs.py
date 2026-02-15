@@ -588,6 +588,7 @@ def run_rclone(
     env: dict[str, str] | None = None,
     cwd: Path | str | None = None,
     timeout: float | None = None,
+    capture_output: bool = True,
 ) -> tuple[int, str, str]:
     """Run rclone subprocess and return (returncode, stdout, stderr).
 
@@ -596,6 +597,7 @@ def run_rclone(
         env: Optional environment variables to add/override
         cwd: Optional working directory
         timeout: Optional timeout in seconds
+        capture_output: If True, capture stdout/stderr. If False, output to terminal.
 
     Returns:
         Tuple of (returncode, stdout, stderr)
@@ -614,9 +616,14 @@ def run_rclone(
         run_env.update(env)
 
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, env=run_env, cwd=cwd, timeout=timeout
-        )
+        if capture_output:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, env=run_env, cwd=cwd, timeout=timeout
+            )
+        else:
+            result = subprocess.run(
+                cmd, capture_output=False, text=True, env=run_env, cwd=cwd, timeout=timeout
+            )
     except FileNotFoundError as exc:
         raise RcloneError(
             "rclone not found in PATH. Install from https://rclone.org/downloads/",
@@ -627,13 +634,13 @@ def run_rclone(
 
     if result.returncode != 0:
         raise RcloneError(
-            f"rclone failed with code {result.returncode}: {result.stderr}",
+            f"rclone failed with code {result.returncode}: {result.stderr or ''}",
             result.returncode,
-            result.stdout,
-            result.stderr,
+            result.stdout or "",
+            result.stderr or "",
         )
 
-    return result.returncode, result.stdout, result.stderr
+    return result.returncode, result.stdout or "", result.stderr or ""
 
 
 def rclone_config_has_section(path: Path, section: str) -> bool:
@@ -834,7 +841,7 @@ def validate_r2_connection(bucket: str = "vlfs") -> bool:
                 raise
 
     # Test with lsd command
-    run_rclone(["lsd", f"r2:{bucket}"])
+    run_rclone(["lsd", f"r2:{bucket}"], capture_output=False)
     return True
 
 
@@ -883,7 +890,7 @@ def upload_to_r2(
     remote_path = f"r2:{bucket}/{object_key}"
 
     def do_upload():
-        run_rclone(["copy", str(local_path), remote_path])
+        run_rclone(["copy", str(local_path), remote_path, "-P"], capture_output=False)
 
     retry(do_upload, attempts=3, base_delay=1.0)
     return True
@@ -935,7 +942,9 @@ def download_from_r2(
                     files_from_path,
                     "--transfers",
                     "8",
-                ]
+                    "-P",
+                ],
+                capture_output=False,
             )
 
         retry(do_download, attempts=3, base_delay=1.0)
@@ -1127,7 +1136,9 @@ def upload_to_drive(
                 "1",
                 "--drive-chunk-size",
                 "8M",
-            ]
+                "-P",
+            ],
+            capture_output=False,
         )
 
     # Use more retries for Drive due to rate limiting
@@ -1200,7 +1211,9 @@ def download_from_drive(
                     "1",
                     "--drive-chunk-size",
                     "8M",
-                ]
+                    "-P",
+                ],
+                capture_output=False,
             )
 
         retry(do_download, attempts=5, base_delay=2.0)
@@ -2010,6 +2023,9 @@ def _push_single_file_collect(
     # Determine remote
     remote = "gdrive" if private else "r2"
     logger.debug(f"Target remote: {remote}")
+
+    if not dry_run:
+        print(f"Pushing {rel_path} to {remote} ({format_bytes(size)})...")
 
     if dry_run:
         print(f"[DRY-RUN] Would upload {rel_path} to {remote} ({format_bytes(size)})")
