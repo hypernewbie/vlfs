@@ -302,6 +302,7 @@ def retry(
 
 def hash_file(path: Path) -> tuple[str, int, float]:
     """Compute SHA256 hash of file, return (hex_digest, size, mtime)."""
+    print(f"  Hashing {path.name}...")
     sha256 = hashlib.sha256()
     size = 0
 
@@ -384,8 +385,12 @@ def store_object(src_path: Path, cache_dir: Path, compression_level: int = 3) ->
         return object_key
 
     # Read, compress, and store atomically
+    print(f"  Compressing {src_path.name}...")
     data = src_path.read_bytes()
     compressed = compress_bytes(data, level=compression_level)
+    
+    ratio = (len(compressed) / len(data)) * 100 if len(data) > 0 else 100
+    print(f"  Stored in cache ({format_bytes(len(data))} -> {format_bytes(len(compressed))}, {ratio:.1f}%)")
 
     atomic_write_bytes(object_path, compressed)
 
@@ -609,6 +614,8 @@ def run_rclone(
     config_path = get_rclone_config_path()
     if config_path:
         cmd += ["--config", str(config_path)]
+
+    print(f"  Running: {' '.join(cmd)}")
 
     run_env = None
     if env:
