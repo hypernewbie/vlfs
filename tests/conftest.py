@@ -168,6 +168,20 @@ exit 0
 
 
 @pytest.fixture(autouse=True)
+def mock_user_config(monkeypatch: Any, tmp_path: Path) -> Path:
+    """Isolate all tests from the real user configuration.
+    
+    Sets VLFS_USER_CONFIG to a temporary directory for every test.
+    This prevents accidental reads/writes to the actual ~/.config/vlfs 
+    or %APPDATA%/vlfs directories.
+    """
+    config_dir = tmp_path / "mock_config"
+    config_dir.mkdir()
+    monkeypatch.setenv("VLFS_USER_CONFIG", str(config_dir))
+    return config_dir
+
+
+@pytest.fixture(autouse=True)
 def mock_r2_creds(monkeypatch: Any) -> None:
     """Set dummy R2 credentials for all tests."""
     monkeypatch.setenv("RCLONE_CONFIG_R2_ACCESS_KEY_ID", "test_key")

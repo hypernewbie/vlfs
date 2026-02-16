@@ -5,12 +5,6 @@ from pathlib import Path
 import vlfs
 
 class TestUserConfigDir:
-    def test_returns_platform_path(self):
-        """Should return platform-appropriate config dir."""
-        path = vlfs.get_user_config_dir()
-        assert 'vlfs' in str(path)
-        assert path.exists()
-    
     def test_env_override(self, tmp_path, monkeypatch):
         """VLFS_USER_CONFIG should override."""
         monkeypatch.setenv('VLFS_USER_CONFIG', str(tmp_path))
