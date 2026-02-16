@@ -23,6 +23,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 import argparse
 import fnmatch
+import glob
 import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
@@ -1512,12 +1513,31 @@ def group_objects_by_remote(index: dict[str, Any]) -> dict[str, list[tuple[str, 
 # =============================================================================
 
 
+def resolve_targets(path_arg: str) -> list[Path]:
+    """Resolve a path argument (which may be a glob) to a list of existing files/dirs."""
+    if not path_arg:
+        return []
+
+    # Check for glob characters
+    if any(c in path_arg for c in "*?[]"):
+        # Expand glob relative to CWD
+        # glob.glob handles both rel and abs patterns
+        matches = glob.glob(path_arg, recursive=True)
+        return [Path(p).resolve() for p in matches]
+    else:
+        # Exact path
+        p = Path(path_arg).resolve()
+        # Return it even if not exists, caller handles error
+        return [p]
+
+
 def cmd_list(
     repo_root: Path,
     vlfs_dir: Path,
     long_format: bool = False,
     remote_filter: str | None = None,
     json_output: bool = False,
+    pattern: str | None = None,
 ) -> int:
     """Execute list command."""
     try:
@@ -1532,10 +1552,32 @@ def cmd_list(
             print("[]")
         return 0
 
+    # Normalize pattern if provided
+    full_pattern = None
+    if pattern:
+        cwd = Path.cwd()
+        try:
+             rel_cwd = cwd.relative_to(repo_root)
+             prefix = str(rel_cwd).replace(os.sep, "/")
+             if prefix != ".":
+                 full_pattern = f"{prefix}/{pattern}"
+             else:
+                 full_pattern = pattern
+        except ValueError:
+             full_pattern = pattern
+        
+        # Ensure forward slashes
+        full_pattern = full_pattern.replace(os.sep, "/")
+
     filtered_entries = []
     for rel_path, entry in entries.items():
         if remote_filter and entry.get("remote", "r2") != remote_filter:
             continue
+            
+        if full_pattern:
+            if not fnmatch.fnmatch(rel_path, full_pattern):
+                continue
+
         filtered_entries.append((rel_path, entry))
 
     # Sort by path
@@ -1629,6 +1671,7 @@ def cmd_pull(
     cache_dir: Path,
     force: bool = False,
     dry_run: bool = False,
+    pattern: str | None = None,
 ) -> int:
     """Execute pull command with support for mixed remotes."""
     try:
@@ -1640,6 +1683,33 @@ def cmd_pull(
     if not index.get("entries"):
         print("No files to pull (index is empty)")
         return 0
+
+    # Filter entries if pattern provided
+    if pattern:
+        cwd = Path.cwd()
+        try:
+             rel_cwd = cwd.relative_to(repo_root)
+             prefix = str(rel_cwd).replace(os.sep, "/")
+             if prefix != ".":
+                 full_pattern = f"{prefix}/{pattern}"
+             else:
+                 full_pattern = pattern
+        except ValueError:
+             full_pattern = pattern
+        
+        full_pattern = full_pattern.replace(os.sep, "/")
+        
+        filtered_entries = {}
+        for k, v in index["entries"].items():
+            if fnmatch.fnmatch(k, full_pattern):
+                filtered_entries[k] = v
+        
+        if not filtered_entries:
+            print(f"No tracked files match pattern: {pattern}")
+            return 0
+            
+        index["entries"] = filtered_entries
+        print(f"Pulling {len(filtered_entries)} files matching '{pattern}'...")
 
     # Load merged config
     config = load_merged_config(vlfs_dir)
@@ -1733,7 +1803,7 @@ def cmd_push(
     repo_root: Path,
     vlfs_dir: Path,
     cache_dir: Path,
-    path: str,
+    paths: list[str],
     private: bool,
     dry_run: bool = False,
 ) -> int:
@@ -1754,70 +1824,109 @@ def cmd_push(
             print(f"Error: {e}", file=sys.stderr)
             return 1
 
-    src_path = Path(path)
-    # Resolve relative to repo_root if not absolute
-    if not src_path.is_absolute():
-        src_path = repo_root / src_path
-    src_path = src_path.resolve()
+    # Resolve target paths (supports globs)
+    all_targets = []
+    for path in paths:
+        targets = resolve_targets(path)
+        if targets:
+            all_targets.extend(targets)
+        else:
+            print(f"Error: No files found matching: {path}", file=sys.stderr)
+            # return 1 # Don't return, keep processing other args? 
+            # If user does 'vlfs push a b', and a exists but b doesn't.
+            # Usually we warn and continue or fail at end.
+            pass
 
-    if not src_path.exists():
-        print(f"Error: File not found: {path}", file=sys.stderr)
+    if not all_targets:
+        return 1
+
+    targets = all_targets
+    # ... rest of function uses targets
+
+
+    # Filter out non-existent files
+    valid_targets = []
+    for t in targets:
+        if not t.exists():
+            print(f"Error: File not found: {t}", file=sys.stderr)
+            continue
+        valid_targets.append(t)
+        
+    if not valid_targets:
         return 1
 
     # Load config for compression level
     compression_level = config.get("defaults", {}).get("compression_level", 3)
+    
+    files_processed = 0
+    failed = []
+    updates: dict[str, dict[str, Any]] = {}
 
-    # Handle directory
-    if src_path.is_dir():
-        print(f"Scanning directory {path}...")
-        files = _find_files_recursive(repo_root, src_path)
-        if not files:
-            print(f"No files found in directory: {path}")
-            return 0
+    for src_path in valid_targets:
+        # Handle directory
+        if src_path.is_dir():
+            print(f"Scanning directory {src_path}...")
+            files = _find_files_recursive(repo_root, src_path)
+            if not files:
+                print(f"No files found in directory: {src_path}")
+                continue
 
-        print(f"Pushing {len(files)} files from {path}...")
-        failed = []
-        updates: dict[str, dict[str, Any]] = {}
-        for file_path in files:
+            print(f"Pushing {len(files)} files from {src_path}...")
+            for file_path in files:
+                result, entry = _push_single_file_collect(
+                    repo_root,
+                    vlfs_dir,
+                    cache_dir,
+                    file_path,
+                    private,
+                    dry_run,
+                    compression_level,
+                    r2_bucket=r2_bucket,
+                    drive_bucket=drive_bucket,
+                )
+                files_processed += 1
+                if result != 0:
+                    try:
+                        failed.append(str(file_path.relative_to(repo_root)))
+                    except ValueError:
+                        failed.append(str(file_path))
+                elif entry:
+                    updates.update(entry)
+
+        else:
+            # Handle single file
             result, entry = _push_single_file_collect(
                 repo_root,
                 vlfs_dir,
                 cache_dir,
-                file_path,
+                src_path,
                 private,
                 dry_run,
                 compression_level,
                 r2_bucket=r2_bucket,
                 drive_bucket=drive_bucket,
             )
+            files_processed += 1
             if result != 0:
-                failed.append(str(file_path.relative_to(repo_root)))
+                 try:
+                    failed.append(str(src_path.relative_to(repo_root)))
+                 except ValueError:
+                    failed.append(str(src_path))
             elif entry:
                 updates.update(entry)
 
-        if failed:
-            print(f"Failed to push {len(failed)} files")
-            return 1
+    if failed:
+        print(f"Failed to push {len(failed)} files")
+        return 1
 
-        if not dry_run and updates:
-            update_index_entries(vlfs_dir, updates)
+    if files_processed == 0:
+        print("No files processed.")
         return 0
 
-    # Handle single file
-    result, entry = _push_single_file_collect(
-        repo_root,
-        vlfs_dir,
-        cache_dir,
-        src_path,
-        private,
-        dry_run,
-        compression_level,
-        r2_bucket=r2_bucket,
-        drive_bucket=drive_bucket,
-    )
-    if not dry_run and entry:
-        update_index_entries(vlfs_dir, entry)
-    return result
+    if not dry_run and updates:
+        update_index_entries(vlfs_dir, updates)
+        
+    return 0
 
 
 def cmd_push_all(
@@ -2032,7 +2141,7 @@ def cmd_remove(
     repo_root: Path,
     vlfs_dir: Path,
     cache_dir: Path,
-    path: str,
+    paths: list[str],
     force: bool = False,
     dry_run: bool = False,
     delete_file: bool = False,
@@ -2049,33 +2158,89 @@ def cmd_remove(
         print("Index is empty")
         return 0
 
-    # Resolve target path
-    target_path = Path(path)
-    if not target_path.is_absolute():
-        target_path = repo_root / target_path
-    target_path = target_path.resolve()
+    # Resolve target paths
+    all_targets = []
+    
+    # We must handle paths individually or collectively?
+    # If user provides multiple paths, we iterate.
+    # But `resolve_targets` returns paths.
+    
+    # We also need to keep track of missing globs for fallback matching.
+    
+    filesystem_targets = []
+    failed_glob_paths = []
+    
+    for path in paths:
+        targets = resolve_targets(path)
+        if targets:
+            filesystem_targets.extend(targets)
+        else:
+            # Maybe it's a missing file or index-only glob
+            failed_glob_paths.append(path)
 
     # Identify files to remove
     to_remove = []
-    if target_path.is_dir():
-        # Find all tracked files within directory
-        target_rel = str(target_path.relative_to(repo_root)).replace(os.sep, "/")
-        for rel_path in entries:
-            if rel_path == target_rel or rel_path.startswith(target_rel + "/"):
-                to_remove.append(rel_path)
-    else:
-        # Single file
+
+    # 1. Check resolved filesystem targets
+    for target_path in filesystem_targets:
+        # ... logic ...
         try:
-            target_rel = str(target_path.relative_to(repo_root)).replace(os.sep, "/")
+            target_path.relative_to(repo_root)
         except ValueError:
-             print(f"Error: Path {path} is not in repository", file=sys.stderr)
-             return 1
+            print(f"Warning: {target_path} is outside repository", file=sys.stderr)
+            continue
+            
+        if target_path.is_dir():
+            target_rel = str(target_path.relative_to(repo_root)).replace(os.sep, "/")
+            for rel_path in entries:
+                if rel_path == target_rel or rel_path.startswith(target_rel + "/"):
+                    if rel_path not in to_remove:
+                        to_remove.append(rel_path)
+        else:
+            target_rel = str(target_path.relative_to(repo_root)).replace(os.sep, "/")
+            if target_rel in entries:
+                if target_rel not in to_remove:
+                    to_remove.append(target_rel)
+            # No warn here, handled by fallback logic?
+
+    # 2. Check failed glob paths (index matching)
+    for path in failed_glob_paths:
+        matched = False
+        if any(c in path for c in "*?[]"):
+             # It's a glob, try matching against index keys
+             import fnmatch
+             cwd = Path.cwd()
+             try:
+                 rel_cwd = cwd.relative_to(repo_root)
+                 prefix = str(rel_cwd).replace(os.sep, "/")
+                 if prefix == ".":
+                     search_pattern = path
+                 else:
+                     search_pattern = f"{prefix}/{path}"
+             except ValueError:
+                 search_pattern = path
+
+             search_pattern = search_pattern.replace(os.sep, "/")
+
+             for rel_path in entries:
+                 if fnmatch.fnmatch(rel_path, search_pattern):
+                     if rel_path not in to_remove:
+                         to_remove.append(rel_path)
+                     matched = True
         
-        if target_rel in entries:
-            to_remove.append(target_rel)
+        # 3. Handle exact path to missing file
+        if not matched and not any(c in path for c in "*?[]"):
+             target_path = Path(path).resolve()
+             try:
+                target_rel = str(target_path.relative_to(repo_root)).replace(os.sep, "/")
+                if target_rel in entries:
+                    if target_rel not in to_remove:
+                        to_remove.append(target_rel)
+             except ValueError:
+                pass
 
     if not to_remove:
-        print(f"No tracked files found matching: {path}")
+        print(f"No tracked files found matching: {paths}")
         return 0
 
     print(f"Found {len(to_remove)} files to remove.")
@@ -2581,6 +2746,9 @@ def main(argv: list[str] | None = None) -> int:
     # pull command
     pull_parser = subparsers.add_parser("pull", help="Download files from remote")
     pull_parser.add_argument(
+        "path", nargs="?", help="Path or glob pattern to pull"
+    )
+    pull_parser.add_argument(
         "--force", action="store_true", help="Overwrite locally modified files"
     )
     pull_parser.add_argument(
@@ -2592,7 +2760,7 @@ def main(argv: list[str] | None = None) -> int:
     # push command
     push_parser = subparsers.add_parser("push", help="Upload file(s) to remote")
     push_parser.add_argument(
-        "path", nargs="?", help="Path to file or directory to push"
+        "paths", nargs="*", help="Path(s) to file or directory to push"
     )
     push_parser.add_argument(
         "--private", action="store_true", help="Upload to private storage (Drive)"
@@ -2610,7 +2778,7 @@ def main(argv: list[str] | None = None) -> int:
     # remove command
     remove_parser = subparsers.add_parser("remove", help="Remove file(s) from VLFS tracking and storage")
     remove_parser.add_argument(
-        "path", help="Path to file or directory to remove"
+        "paths", nargs="+", help="Path(s) to file or directory to remove"
     )
     remove_parser.add_argument(
         "--force", "-f", action="store_true", help="Skip confirmation prompt"
@@ -2628,6 +2796,9 @@ def main(argv: list[str] | None = None) -> int:
 
     # list command
     list_parser = subparsers.add_parser("ls", help="List tracked files")
+    list_parser.add_argument(
+        "pattern", nargs="?", help="Glob pattern to filter listing"
+    )
     list_parser.add_argument(
         "--long", "-l", action="store_true", help="Show detailed information"
     )
@@ -2734,6 +2905,7 @@ def main(argv: list[str] | None = None) -> int:
             getattr(args, "long", False),
             getattr(args, "remote", None),
             json_output,
+            getattr(args, "pattern", None),
         )
     elif args.command == "verify":
         return cmd_verify(repo_root, vlfs_dir, dry_run, json_output)
@@ -2744,14 +2916,19 @@ def main(argv: list[str] | None = None) -> int:
             repo_root,
             vlfs_dir,
             cache_dir,
-            args.path,
+            args.paths,
             args.force,
             dry_run,
             args.delete_file,
         )
     elif args.command == "pull":
         return cmd_pull(
-            repo_root, vlfs_dir, cache_dir, getattr(args, "force", False), dry_run
+            repo_root,
+            vlfs_dir,
+            cache_dir,
+            getattr(args, "force", False),
+            dry_run,
+            getattr(args, "path", None),
         )
     elif args.command == "push":
         if args.all:
@@ -2760,9 +2937,9 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_push_glob(
                 repo_root, vlfs_dir, cache_dir, args.glob, args.private, dry_run
             )
-        elif args.path:
+        elif args.paths:
             return cmd_push(
-                repo_root, vlfs_dir, cache_dir, args.path, args.private, dry_run
+                repo_root, vlfs_dir, cache_dir, args.paths, args.private, dry_run
             )
         else:
             print("Error: push requires a path, --glob, or --all", file=sys.stderr)

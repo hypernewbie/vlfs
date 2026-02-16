@@ -54,7 +54,7 @@ def test_push_aborts_if_no_auth(tmp_path):
                     repo_root, 
                     vlfs_dir, 
                     cache_dir, 
-                    path="somefile", 
+                    paths=["somefile"], 
                     private=False, 
                     dry_run=False
                 )
@@ -178,7 +178,7 @@ def test_push_fails_with_empty_config_file(tmp_path):
                         repo_root,
                         repo_root / ".vlfs",
                         repo_root / ".vlfs-cache",
-                        path=".",
+                        paths=["."],
                         private=False,
                         dry_run=False
                     )

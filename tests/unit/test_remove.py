@@ -12,9 +12,10 @@ import vlfs
 class TestRemove:
     """Test remove command."""
 
-    def test_remove_single_file(self, tmp_path, rclone_mock):
+    def test_remove_single_file(self, tmp_path, rclone_mock, monkeypatch):
         """Should remove file from index, cache, and remote."""
         repo_root = tmp_path
+        monkeypatch.chdir(repo_root)
         vlfs_dir = repo_root / ".vlfs"
         cache_dir = repo_root / ".vlfs-cache"
         
@@ -51,7 +52,7 @@ class TestRemove:
         })
         
         # Run remove
-        vlfs.cmd_remove(repo_root, vlfs_dir, cache_dir, "test.file", force=True)
+        vlfs.cmd_remove(repo_root, vlfs_dir, cache_dir, ["test.file"], force=True)
         
         # Check index
         new_index = vlfs.read_index(vlfs_dir)
@@ -63,9 +64,10 @@ class TestRemove:
         # Check remote call
         assert mock["calls"][0] == ["rclone", "deletefile", "r2:vlfs/ab/cd/hash", "--s3-no-check-bucket"]
 
-    def test_remove_directory(self, tmp_path, rclone_mock):
+    def test_remove_directory(self, tmp_path, rclone_mock, monkeypatch):
         """Should remove all files in directory."""
         repo_root = tmp_path
+        monkeypatch.chdir(repo_root)
         vlfs_dir = repo_root / ".vlfs"
         cache_dir = repo_root / ".vlfs-cache"
         vlfs.ensure_dirs(vlfs_dir, cache_dir)
@@ -94,7 +96,7 @@ class TestRemove:
         (cache_dir / "objects/k2").parent.mkdir(parents=True, exist_ok=True)
         (cache_dir / "objects/k2").touch()
         
-        vlfs.cmd_remove(repo_root, vlfs_dir, cache_dir, "dir", force=True)
+        vlfs.cmd_remove(repo_root, vlfs_dir, cache_dir, ["dir"], force=True)
         
         new_index = vlfs.read_index(vlfs_dir)
         assert "dir/f1" not in new_index["entries"]
@@ -106,9 +108,10 @@ class TestRemove:
         assert "r2:vlfs/k1" in cmds
         assert "r2:vlfs/k2" in cmds
 
-    def test_deduplication_preserves_object(self, tmp_path, rclone_mock):
+    def test_deduplication_preserves_object(self, tmp_path, rclone_mock, monkeypatch):
         """Should not delete object if referenced by another file."""
         repo_root = tmp_path
+        monkeypatch.chdir(repo_root)
         vlfs_dir = repo_root / ".vlfs"
         cache_dir = repo_root / ".vlfs-cache"
         vlfs.ensure_dirs(vlfs_dir, cache_dir)
@@ -130,7 +133,7 @@ class TestRemove:
         cache_obj.touch()
         
         # Remove f1
-        vlfs.cmd_remove(repo_root, vlfs_dir, cache_dir, "f1", force=True)
+        vlfs.cmd_remove(repo_root, vlfs_dir, cache_dir, ["f1"], force=True)
         
         # Check index
         new_index = vlfs.read_index(vlfs_dir)
@@ -144,15 +147,16 @@ class TestRemove:
         assert len([c for c in mock["calls"] if c[1] == "deletefile"]) == 0
         
         # Now remove f2
-        vlfs.cmd_remove(repo_root, vlfs_dir, cache_dir, "f2", force=True)
+        vlfs.cmd_remove(repo_root, vlfs_dir, cache_dir, ["f2"], force=True)
         
         # Now it should be gone
         assert not cache_obj.exists()
         assert len([c for c in mock["calls"] if c[1] == "deletefile"]) == 1
 
-    def test_delete_file_flag(self, tmp_path, rclone_mock):
+    def test_delete_file_flag(self, tmp_path, rclone_mock, monkeypatch):
         """Should delete workspace file if flag set."""
         repo_root = tmp_path
+        monkeypatch.chdir(repo_root)
         vlfs_dir = repo_root / ".vlfs"
         cache_dir = repo_root / ".vlfs-cache"
         vlfs.ensure_dirs(vlfs_dir, cache_dir)
@@ -170,6 +174,6 @@ class TestRemove:
         rclone_mock({})
         
         # Run with delete_file=True
-        vlfs.cmd_remove(repo_root, vlfs_dir, cache_dir, "test.file", force=True, delete_file=True)
+        vlfs.cmd_remove(repo_root, vlfs_dir, cache_dir, ["test.file"], force=True, delete_file=True)
         
         assert not file_path.exists()
