@@ -1740,6 +1740,7 @@ def cmd_pull(
 
     total_downloaded = 0
     total_objects = 0
+    skipped_private_files = 0
 
     # Build map of object key -> compressed size for progress reporting
     key_sizes = {}
@@ -1752,6 +1753,19 @@ def cmd_pull(
     for remote, objects in remote_groups.items():
         object_keys = [obj[0] for obj in objects]
         total_objects += len(object_keys)
+
+        # Check Google Drive auth before attempting download
+        if remote == "gdrive":
+            can_access_drive = False
+            try:
+                can_access_drive = has_drive_token()
+            except RuntimeError:
+                can_access_drive = False  # Treat CI-restriction as "no token"
+            
+            if not can_access_drive:
+                # No auth available - skip private files (summary will be shown at end)
+                skipped_private_files += len(object_keys)
+                continue
 
         try:
             downloaded = _download_remote_group(
@@ -1795,6 +1809,12 @@ def cmd_pull(
         )
     else:
         print(f"Wrote {files_written} files ({format_bytes(bytes_written)})")
+
+    # Report skipped private files due to missing Google Drive auth
+    if skipped_private_files > 0:
+        print(
+            f"Skipped {skipped_private_files} private files (Google Drive auth required)."
+        )
 
     return 0
 
