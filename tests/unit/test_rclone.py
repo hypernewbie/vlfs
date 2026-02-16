@@ -36,7 +36,7 @@ class TestRunRclone:
 
         assert returncode == 0
         assert "bucket1" in stdout
-        assert mock["calls"][0] == ["rclone", "lsd", "r2:"]
+        assert mock["calls"][0] == ["rclone", "lsd", "r2:", "--s3-no-check-bucket"]
 
     def test_failure_raises_rclone_error(self, rclone_mock):
         """Failure should raise RcloneError."""
@@ -221,7 +221,7 @@ class TestValidateR2Connection:
 
         rclone_mock(
             {
-                "lsd": (0, "vlfs", ""),
+                "ls": (0, "vlfs", ""),
             }
         )
 
@@ -239,7 +239,7 @@ class TestValidateR2Connection:
 
         rclone_mock(
             {
-                "lsd": (1, "", "connection refused"),
+                "ls": (1, "", "connection refused"),
             }
         )
 

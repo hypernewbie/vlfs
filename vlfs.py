@@ -334,6 +334,8 @@ def hash_files_parallel(
         cpu_count = os.cpu_count() or 4
         max_workers = min(32, cpu_count * 2)
 
+    print(f"  Hashing {len(paths)} files in parallel...")
+
     results: dict[Path, tuple[str, int, float]] = {}
     errors: dict[Path, Exception] = {}
 
@@ -615,6 +617,10 @@ def run_rclone(
     if config_path:
         cmd += ["--config", str(config_path)]
 
+    # Add global flags for stability with restricted keys
+    # --s3-no-check-bucket prevents HeadBucket calls which fail on scoped keys
+    cmd += ["--s3-no-check-bucket"]
+
     print(f"  Running: {' '.join(cmd)}")
 
     run_env = None
@@ -847,8 +853,20 @@ def validate_r2_connection(bucket: str = "vlfs") -> bool:
                 # Re-raise original error to prompt for env vars or config
                 raise
 
-    # Test with lsd command
-    run_rclone(["lsd", f"r2:{bucket}"], capture_output=False)
+    print(f"  Verifying R2 connection to bucket '{bucket}'...")
+
+    # Test with ls command (less strict permissions than lsd)
+    # We check for a dummy file. Even if it doesn't exist, ls returns 0.
+    # We only care if it fails due to auth/connection errors.
+    try:
+        run_rclone(["ls", f"r2:{bucket}/.vlfs-check", "--max-depth", "1"], capture_output=False)
+    except RcloneError as e:
+        # If it's a "directory not found" (which rclone might emit for empty buckets on some remotes),
+        # we can ignore it. But usually ls returns 0 with empty output.
+        # If it's an auth error, re-raise.
+        if "directory not found" in str(e).lower():
+            return True
+        raise
     return True
 
 
@@ -868,6 +886,35 @@ def remote_object_exists(object_key: str, bucket: str = "vlfs") -> bool:
         returncode, stdout, _ = run_rclone(["ls", f"r2:{bucket}/{object_key}"])
         return returncode == 0 and stdout.strip() != ""
     except RcloneError:
+        return False
+
+
+def delete_from_remote(
+    remote: str, bucket: str, object_key: str, dry_run: bool = False
+) -> bool:
+    """Delete object from remote storage.
+
+    Args:
+        remote: Remote name ("r2" or "gdrive")
+        bucket: Bucket name
+        object_key: Object key to delete
+        dry_run: If True, don't actually delete
+
+    Returns:
+        True if deletion succeeded
+    """
+    if dry_run:
+        print(f"[DRY-RUN] Would delete {remote}:{bucket}/{object_key}")
+        return True
+
+    print(f"  Deleting from {remote}...")
+    try:
+        run_rclone(
+            ["deletefile", f"{remote}:{bucket}/{object_key}"], capture_output=False
+        )
+        return True
+    except RcloneError as e:
+        print(f"Error deleting from {remote}: {e}", file=sys.stderr)
         return False
 
 
@@ -964,6 +1011,8 @@ def download_http(url: str, dest: Path, timeout: float = 60) -> None:
     """Download URL to dest atomically."""
     import urllib.request
     import urllib.error
+
+    print(f"  Downloading {url}...")
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_path = tempfile.mkstemp(dir=dest.parent)
@@ -1066,6 +1115,7 @@ def auth_gdrive(vlfs_dir: Path) -> int:
     try:
         # Use rclone config create with built-in OAuth
         # This creates a remote named 'gdrive' of type 'drive'
+        print("Launching browser for authentication...")
         subprocess.run(
             [
                 "rclone",
@@ -1097,6 +1147,7 @@ def auth_gdrive(vlfs_dir: Path) -> int:
             token = json.loads(token)
 
         # Write token file atomically (raw JSON content)
+        print("Saving authentication token...")
         atomic_write_text(token_file, token)
 
         print()
@@ -1134,6 +1185,7 @@ def upload_to_drive(
     remote_path = f"gdrive:{bucket}/{object_key}"
 
     def do_upload():
+        print(f"  Uploading {local_path.name} to Drive...")
         run_rclone(
             [
                 "copy",
@@ -1305,6 +1357,7 @@ def materialize_workspace(
                 hex_digest, _, _ = hash_file(file_path)
                 # If matches target, we are good (already up to date)
                 if hex_digest == entry.get("hash"):
+                    print(f"  Skipping {rel_path} (up to date)")
                     continue
 
                 # If different, and NOT force, skip
@@ -1327,6 +1380,7 @@ def materialize_workspace(
             continue
 
         # Write atomically
+        print(f"  Restoring {rel_path}...")
         atomic_write_bytes(file_path, data)
         files_written += 1
         bytes_written += len(data)
@@ -1370,6 +1424,7 @@ def _find_untracked_files(
 
 def compute_status(index: dict[str, Any], repo_root: Path) -> dict[str, list[str]]:
     """Compare workspace against index, return categorized lists."""
+    print("Analyzing workspace status...")
     entries = index.get("entries", {})
 
     missing = []
@@ -1390,6 +1445,7 @@ def compute_status(index: dict[str, Any], repo_root: Path) -> dict[str, list[str
 
     if to_hash:
         paths_to_hash = [item[1] for item in to_hash]
+        print(f"  Hashing {len(paths_to_hash)} potential modifications...")
         if len(paths_to_hash) >= 8:
             results, errors = hash_files_parallel(paths_to_hash)
         else:
@@ -1419,6 +1475,7 @@ def compute_status(index: dict[str, Any], repo_root: Path) -> dict[str, list[str
     if not patterns:
         patterns = ["*.psd", "*.zip", "*.exe", "*.dll", "*.lib", "*.iso", "*.mp4"]
 
+    print("  Scanning for untracked files...")
     extra = _find_untracked_files(repo_root, entries, patterns)
 
     return {"missing": missing, "modified": modified, "extra": extra}
@@ -1453,6 +1510,61 @@ def group_objects_by_remote(index: dict[str, Any]) -> dict[str, list[tuple[str, 
 # =============================================================================
 # Commands
 # =============================================================================
+
+
+def cmd_list(
+    repo_root: Path,
+    vlfs_dir: Path,
+    long_format: bool = False,
+    remote_filter: str | None = None,
+    json_output: bool = False,
+) -> int:
+    """Execute list command."""
+    try:
+        index = read_index(vlfs_dir)
+    except VLFSIndexError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    entries = index.get("entries", {})
+    if not entries:
+        if json_output:
+            print("[]")
+        return 0
+
+    filtered_entries = []
+    for rel_path, entry in entries.items():
+        if remote_filter and entry.get("remote", "r2") != remote_filter:
+            continue
+        filtered_entries.append((rel_path, entry))
+
+    # Sort by path
+    filtered_entries.sort(key=lambda x: x[0])
+
+    if json_output:
+        output_list = []
+        for rel_path, entry in filtered_entries:
+            item = entry.copy()
+            item["path"] = rel_path
+            output_list.append(item)
+        print(json.dumps(output_list, indent=2))
+        return 0
+
+    if long_format:
+        # Calculate column widths
+        # Hash (8 chars), Size (10 chars), Remote (8 chars), Path (remainder)
+        print(f"{'HASH':<8} {'SIZE':<10} {'REMOTE':<8} {'PATH'}")
+        print("-" * 60)
+        for rel_path, entry in filtered_entries:
+            h = entry.get("hash", "")[:8]
+            s = format_bytes(entry.get("size", 0))
+            r = entry.get("remote", "r2")
+            print(f"{h:<8} {s:<10} {r:<8} {rel_path}")
+    else:
+        for rel_path, _ in filtered_entries:
+            print(rel_path)
+
+    return 0
 
 
 def cmd_status(
@@ -1657,6 +1769,7 @@ def cmd_push(
 
     # Handle directory
     if src_path.is_dir():
+        print(f"Scanning directory {path}...")
         files = _find_files_recursive(repo_root, src_path)
         if not files:
             print(f"No files found in directory: {path}")
@@ -1718,6 +1831,7 @@ def cmd_push_all(
         return 1
 
     # Find modified files
+    print("Scanning for modified files...")
     status = compute_status(index, repo_root)
     files_to_push = status["missing"] + status["modified"]
 
@@ -1776,6 +1890,7 @@ def cmd_push_glob(
     dry_run: bool,
 ) -> int:
     """Push files matching a glob pattern."""
+    print(f"Searching for files matching '{pattern}'...")
     matched_files = _collect_glob_matches(repo_root, pattern)
 
     if not matched_files:
@@ -1829,6 +1944,7 @@ def cmd_verify(
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
+    print("Verifying workspace integrity...")
     entries = index.get("entries", {})
     corrupted = []
     missing = []
@@ -1857,6 +1973,7 @@ def cmd_verify(
 
     if to_hash:
         paths_to_hash = [item[1] for item in to_hash]
+        print(f"  Hashing {len(paths_to_hash)} files...")
         if len(paths_to_hash) >= 8:
             logger.debug("Hashing %d files in parallel", len(paths_to_hash))
             results, errors = hash_files_parallel(paths_to_hash)
@@ -1911,6 +2028,166 @@ def cmd_verify(
     return 1 if (corrupted or missing) else 0
 
 
+def cmd_remove(
+    repo_root: Path,
+    vlfs_dir: Path,
+    cache_dir: Path,
+    path: str,
+    force: bool = False,
+    dry_run: bool = False,
+    delete_file: bool = False,
+) -> int:
+    """Execute remove command."""
+    try:
+        index = read_index(vlfs_dir)
+    except VLFSIndexError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    entries = index.get("entries", {})
+    if not entries:
+        print("Index is empty")
+        return 0
+
+    # Resolve target path
+    target_path = Path(path)
+    if not target_path.is_absolute():
+        target_path = repo_root / target_path
+    target_path = target_path.resolve()
+
+    # Identify files to remove
+    to_remove = []
+    if target_path.is_dir():
+        # Find all tracked files within directory
+        target_rel = str(target_path.relative_to(repo_root)).replace(os.sep, "/")
+        for rel_path in entries:
+            if rel_path == target_rel or rel_path.startswith(target_rel + "/"):
+                to_remove.append(rel_path)
+    else:
+        # Single file
+        try:
+            target_rel = str(target_path.relative_to(repo_root)).replace(os.sep, "/")
+        except ValueError:
+             print(f"Error: Path {path} is not in repository", file=sys.stderr)
+             return 1
+        
+        if target_rel in entries:
+            to_remove.append(target_rel)
+
+    if not to_remove:
+        print(f"No tracked files found matching: {path}")
+        return 0
+
+    print(f"Found {len(to_remove)} files to remove.")
+    
+    # Confirmation
+    if not force and not dry_run:
+        response = input("Remove these files from VLFS (index, cache, cloud)? [y/N] ").strip().lower()
+        if response not in ("y", "yes"):
+            print("Aborted")
+            return 0
+
+    # Count object references (to avoid deleting shared objects)
+    object_ref_counts = {}
+    for entry in entries.values():
+        key = entry.get("object_key")
+        if key:
+            object_ref_counts[key] = object_ref_counts.get(key, 0) + 1
+
+    # Load config for buckets
+    config = load_merged_config(vlfs_dir)
+    r2_bucket = config.get("remotes", {}).get("r2", {}).get("bucket", "vlfs")
+    drive_bucket = config.get("remotes", {}).get("gdrive", {}).get("bucket", "vlfs")
+
+    removed_count = 0
+    updates: dict[str, Any] = {} # Actually deletions, but we use this to batch update? No, just modify index dict directly and write once.
+
+    # We need to modify 'entries' in place, but iterating over it while modifying is bad.
+    # So we'll iterate over 'to_remove' and pop from 'entries'.
+    
+    # But wait, we need to write index atomically. 
+    # Let's modify a copy or just modify the loaded dict and write it back at end.
+    
+    for rel_path in to_remove:
+        print(f"Removing {rel_path}...")
+        entry = entries[rel_path]
+        object_key = entry.get("object_key")
+        remote = entry.get("remote", "r2")
+        
+        # Decrement ref count
+        if object_key:
+            object_ref_counts[object_key] -= 1
+            remaining_refs = object_ref_counts[object_key]
+            
+            if remaining_refs == 0:
+                print(f"  Object {object_key} is unreferenced.")
+                # Delete from cache
+                cache_obj_path = cache_dir / "objects" / object_key
+                if cache_obj_path.exists():
+                    if dry_run:
+                        print(f"[DRY-RUN] Would delete local cache object {object_key}")
+                    else:
+                        print(f"  Deleting from cache...")
+                        try:
+                            cache_obj_path.unlink()
+                        except OSError as e:
+                            print(f"  Warning: Failed to delete cache object: {e}", file=sys.stderr)
+
+                # Delete from remote
+                if remote == "gdrive":
+                    # Check token? Maybe skip if no token but warn?
+                    # The delete_from_remote function handles the call, but we should probably check auth globally once if possible.
+                    # For now rely on individual calls.
+                    delete_from_remote("gdrive", drive_bucket, object_key, dry_run)
+                else: # r2
+                     delete_from_remote("r2", r2_bucket, object_key, dry_run)
+            else:
+                print(f"  Object {object_key} referenced by {remaining_refs} other files, keeping in storage.")
+
+        # Remove from index structure (in memory)
+        if not dry_run:
+            del entries[rel_path]
+        
+        # Optionally delete workspace file
+        if delete_file:
+            ws_file = repo_root / rel_path.replace("/", os.sep)
+            if ws_file.exists():
+                if dry_run:
+                    print(f"[DRY-RUN] Would delete workspace file {ws_file}")
+                else:
+                    print(f"  Deleting workspace file...")
+                    try:
+                        ws_file.unlink()
+                    except OSError as e:
+                         print(f"  Warning: Failed to delete workspace file: {e}", file=sys.stderr)
+
+        removed_count += 1
+
+    if not dry_run:
+        # Write updated index
+        # We need to wrap this in lock? update_index_entries does locking. 
+        # But we are doing a bulk delete. 
+        # We should use with_file_lock manually here or create a helper `remove_index_entries`.
+        # For now, let's just use with_file_lock and write_index.
+        with with_file_lock(vlfs_dir / "index.lock"):
+            # Re-read index to be safe? Or just overwrite?
+            # Ideally re-read and apply changes, but we did a lot of logic based on the snapshot.
+            # If we re-read, we might miss new files added concurrently? 
+            # Or if someone else deleted, we might error.
+            # Given single-user CLI nature, overwriting our modified 'entries' is probably acceptable risk, 
+            # but strictly we should lock *before* reading if we want transaction.
+            # But the user interaction (prompt) makes holding lock bad.
+            # Let's just write back what we have.
+            index["entries"] = entries
+            write_index(vlfs_dir, index)
+            
+        # Cleanup empty dirs in cache
+        _cleanup_empty_dirs(cache_dir / "objects")
+
+    print(f"Removed {removed_count} files.")
+    return 0
+
+
 def cmd_clean(
     repo_root: Path,
     vlfs_dir: Path,
@@ -1939,6 +2216,7 @@ def cmd_clean(
         print("Cache directory is empty")
         return 0
 
+    print("Scanning cache for orphaned objects...")
     to_delete = []
     total_size = 0
 
@@ -1977,6 +2255,7 @@ def cmd_clean(
     freed_bytes = 0
     for obj_path in to_delete:
         try:
+            print(f"  Deleting {obj_path.name}...")
             size = obj_path.stat().st_size
             obj_path.unlink()
             deleted_count += 1
@@ -2328,6 +2607,37 @@ def main(argv: list[str] | None = None) -> int:
         "--all", action="store_true", help="Push all new or modified files"
     )
 
+    # remove command
+    remove_parser = subparsers.add_parser("remove", help="Remove file(s) from VLFS tracking and storage")
+    remove_parser.add_argument(
+        "path", help="Path to file or directory to remove"
+    )
+    remove_parser.add_argument(
+        "--force", "-f", action="store_true", help="Skip confirmation prompt"
+    )
+    remove_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be done without doing it",
+    )
+    remove_parser.add_argument(
+        "--delete-file",
+        action="store_true",
+        help="Also delete the local workspace file",
+    )
+
+    # list command
+    list_parser = subparsers.add_parser("ls", help="List tracked files")
+    list_parser.add_argument(
+        "--long", "-l", action="store_true", help="Show detailed information"
+    )
+    list_parser.add_argument(
+        "--json", action="store_true", help="Output in JSON format"
+    )
+    list_parser.add_argument(
+        "--remote", help="Filter by remote (e.g., r2, gdrive)"
+    )
+
     # status command
     status_parser = subparsers.add_parser("status", help="Show workspace status")
     status_parser.add_argument(
@@ -2417,10 +2727,28 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "status":
         return cmd_status(repo_root, vlfs_dir, dry_run, json_output, args.color)
+    elif args.command == "ls":
+        return cmd_list(
+            repo_root,
+            vlfs_dir,
+            getattr(args, "long", False),
+            getattr(args, "remote", None),
+            json_output,
+        )
     elif args.command == "verify":
         return cmd_verify(repo_root, vlfs_dir, dry_run, json_output)
     elif args.command == "clean":
         return cmd_clean(repo_root, vlfs_dir, cache_dir, dry_run, args.yes)
+    elif args.command == "remove":
+        return cmd_remove(
+            repo_root,
+            vlfs_dir,
+            cache_dir,
+            args.path,
+            args.force,
+            dry_run,
+            args.delete_file,
+        )
     elif args.command == "pull":
         return cmd_pull(
             repo_root, vlfs_dir, cache_dir, getattr(args, "force", False), dry_run
