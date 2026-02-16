@@ -29,6 +29,10 @@ Content-addressable storage: SHA256 hashing, 2-level sharding (`ab/cd/hash`), zs
     objects/          # Local cache
 ```
 
+## Git Integration
+
+Commit `.vlfs/` to track your large files. Add `.vlfs-cache/` to your `.gitignore` to keep the data blobs out of Git.
+
 ## Usage
 
 ```bash
