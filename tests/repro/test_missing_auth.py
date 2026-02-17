@@ -139,7 +139,7 @@ def test_push_uses_interactive_rclone_on_partial_auth(tmp_path):
                 
                 # Check the args passed to subprocess.run
                 assert kwargs.get("capture_output") is False, "rclone must be interactive (capture_output=False) to avoid silent hangs"
-                assert "lsd" in args[0]
+                assert "ls" in args[0]
 
 def test_push_fails_with_empty_config_file(tmp_path):
     """
