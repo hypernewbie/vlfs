@@ -941,11 +941,11 @@ def upload_to_r2(
     if remote_object_exists(object_key, bucket):
         return True
 
-    # Upload using rclone copy
+    # Upload using rclone copyto
     remote_path = f"r2:{bucket}/{object_key}"
 
     def do_upload():
-        run_rclone(["copy", str(local_path), remote_path, "-P"], capture_output=False)
+        run_rclone(["copyto", str(local_path), remote_path, "-P"], capture_output=False)
 
     retry(do_upload, attempts=3, base_delay=1.0)
     return True
@@ -1015,10 +1015,16 @@ def download_http(url: str, dest: Path, timeout: float = 60) -> None:
 
     print(f"  Downloading {url}...")
 
+    # Use a browser-like User-Agent to avoid 403 Forbidden from CDNs like Cloudflare
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    req = urllib.request.Request(url, headers=headers)
+
     dest.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_path = tempfile.mkstemp(dir=dest.parent)
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             while chunk := resp.read(65536):
                 os.write(fd, chunk)
         os.close(fd)
@@ -1189,7 +1195,7 @@ def upload_to_drive(
         print(f"  Uploading {local_path.name} to Drive...")
         run_rclone(
             [
-                "copy",
+                "copyto",
                 str(local_path),
                 remote_path,
                 "--transfers",
