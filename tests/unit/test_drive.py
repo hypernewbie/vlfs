@@ -416,11 +416,11 @@ class TestCmdPullMixedRemotes:
         r2_downloaded = []
         drive_downloaded = []
 
-        def mock_r2_download(keys, cache_dir, bucket="vlfs", dry_run=False):
+        def mock_r2_download(keys, cache_dir, bucket="vlfs", dry_run=False, **kwargs):
             r2_downloaded.extend(keys)
             return len(keys)
 
-        def mock_drive_download(keys, cache_dir, bucket="vlfs", dry_run=False):
+        def mock_drive_download(keys, cache_dir, bucket="vlfs", dry_run=False, **kwargs):
             drive_downloaded.extend(keys)
             return len(keys)
 

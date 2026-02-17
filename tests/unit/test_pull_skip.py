@@ -41,7 +41,7 @@ def _mock_download_r2_http_write(cache_dir: Path, data: bytes):
     It writes compressed data for each missing key into cache and returns count.
     """
 
-    def _fn(missing_keys, cache_dir_arg, r2_public_url, dry_run):
+    def _fn(missing_keys, cache_dir_arg, r2_public_url, dry_run, **kwargs):
         # Write compressed bytes for each missing key
         for key in missing_keys:
             obj_path = cache_dir_arg / "objects" / key
@@ -56,7 +56,7 @@ def _mock_download_r2_http_write(cache_dir: Path, data: bytes):
 def _mock_download_drive_write(cache_dir: Path, data: bytes):
     """Return a mock function to mimic download_from_drive writing objects to cache."""
 
-    def _fn(missing_keys, cache_dir_arg, bucket="vlfs", dry_run=False):
+    def _fn(missing_keys, cache_dir_arg, bucket="vlfs", dry_run=False, **kwargs):
         for key in missing_keys:
             obj_path = cache_dir_arg / "objects" / key
             obj_path.parent.mkdir(parents=True, exist_ok=True)

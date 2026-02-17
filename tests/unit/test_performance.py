@@ -61,7 +61,8 @@ class TestParallelHashing:
 
         monkeypatch.setattr(vlfs, 'hash_files_parallel', fake_parallel)
 
-        result = vlfs.cmd_verify(repo_root, repo_root / '.vlfs', dry_run=False, json_output=False)
+        cache_dir = repo_root / '.vlfs-cache'
+        result = vlfs.cmd_verify(repo_root, repo_root / '.vlfs', cache_dir, dry_run=False, json_output=False)
         assert result == 0
         assert called['count'] == len(files)
 
