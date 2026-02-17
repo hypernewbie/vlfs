@@ -17,14 +17,14 @@ class TestUploadToR2:
         
         mock = rclone_mock({
             'ls': (0, '', ''),  # Object doesn't exist
-            'copy': (0, '', ''),
+            'copyto': (0, '', ''),
         })
         
         result = vlfs.upload_to_r2(local_file, 'ab/cd/abcdef')
         
         assert result is True
-        # Should have called ls then copy
-        assert len([c for c in mock['calls'] if c[1] == 'copy']) == 1
+        # Should have called ls then copyto
+        assert len([c for c in mock['calls'] if c[1] == 'copyto']) == 1
     
     def test_skips_existing_file(self, tmp_path, rclone_mock):
         """Should skip upload if object already exists."""
@@ -38,8 +38,8 @@ class TestUploadToR2:
         result = vlfs.upload_to_r2(local_file, 'ab/cd/abcdef')
         
         assert result is True
-        # Should not have called copy
-        assert len([c for c in mock['calls'] if c[1] == 'copy']) == 0
+        # Should not have called copyto
+        assert len([c for c in mock['calls'] if c[1] == 'copyto']) == 0
     
     def test_dry_run_does_not_upload(self, tmp_path, rclone_mock, capsys):
         """Dry run should print but not upload."""
@@ -68,7 +68,7 @@ class TestUploadToR2:
         def handler(cmd):
             if cmd[1] == 'ls':
                 return (0, '', '')  # Object doesn't exist
-            elif cmd[1] == 'copy':
+            elif cmd[1] == 'copyto':
                 call_count[0] += 1
                 if call_count[0] < 2:
                     raise vlfs.RcloneError("transient", 1, "", "")

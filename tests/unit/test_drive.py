@@ -206,14 +206,14 @@ class TestUploadToDrive:
 
         mock = rclone_mock(
             {
-                "copy": (0, "", ""),
+                "copyto": (0, "", ""),
             }
         )
 
         result = vlfs.upload_to_drive(local_file, "ab/cd/abcdef")
 
         assert result is True
-        copy_calls = [c for c in mock["calls"] if c[1] == "copy"]
+        copy_calls = [c for c in mock["calls"] if c[1] == "copyto"]
         assert len(copy_calls) == 1
         assert "--transfers" in copy_calls[0]
         assert "1" in copy_calls[0]
@@ -240,9 +240,11 @@ class TestUploadToDrive:
 
         def handler(cmd):
             call_count[0] += 1
-            if call_count[0] < 2:
-                raise vlfs.RcloneError("rate limit", 1, "", "403 Forbidden")
-            return (0, "", "")
+            if cmd[1] == "copyto":
+                if call_count[0] < 2:
+                    raise vlfs.RcloneError("rate limit", 1, "", "403 Forbidden")
+                return (0, "", "")
+            return (0, "", "") # Default for other commands if any
 
         rclone_mock({"_handler": handler})
 
