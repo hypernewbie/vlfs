@@ -133,7 +133,7 @@ def test_pull_skips_gdrive_without_auth(repo_root, monkeypatch, capsys, tmp_path
 
     out = _read_stdout(capsys)
     assert "Skipped 1 private files (Google Drive auth required)" in out
-    assert "Wrote 1 files" in out
+    assert "Restored 1 files" in out
 
     # R2 file should be materialized into workspace
     assert _obj_exists_in_workspace(repo_root, "file_r2.bin")
@@ -194,7 +194,7 @@ def test_pull_handles_ci_no_drive(repo_root, monkeypatch, capsys, tmp_path):
 
     out = _read_stdout(capsys)
     assert "Skipped 1 private files (Google Drive auth required)" in out
-    assert "Wrote 1 files" in out
+    assert "Restored 1 files" in out
     assert _obj_exists_in_workspace(repo_root, "file_r2.bin")
     assert not _obj_exists_in_workspace(repo_root, "file_gdrive.bin")
 
@@ -257,6 +257,6 @@ def test_pull_with_token_downloads_all(repo_root, monkeypatch, capsys, tmp_path)
     # No skipped message expected
     assert "Skipped" not in out
     # Both files should be written
-    assert "Wrote 2 files" in out
+    assert "Restored 2 files" in out
     assert _obj_exists_in_workspace(repo_root, "file_r2.bin")
     assert _obj_exists_in_workspace(repo_root, "file_gdrive.bin")
