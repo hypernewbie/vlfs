@@ -1,3 +1,12 @@
+#!/usr/bin/env python3
+# /// script
+# dependencies = [
+#   "zstandard",
+#   "filelock",
+#   "tomli; python_version < '3.11'",
+# ]
+# ///
+
 """
 VLFS - Vibecoded Large File Storage CLI
 
@@ -44,7 +53,13 @@ from filelock import FileLock as _FileLock
 logger = logging.getLogger("vlfs")
 
 
+# Enable ANSI escape sequences on Windows 10+
+if os.name == "nt":
+    os.system("")
+
+
 _RCLONE_CONFIG_PATH: Path | None = None
+_LAST_INPLACE_LEN: int = 0
 
 
 # =============================================================================
@@ -75,8 +90,8 @@ class VLFSIndexError(Exception):
 # =============================================================================
 
 
-class Colors:
-    """ANSI color codes for terminal output."""
+class Colours:
+    """ANSI colour codes for terminal output."""
 
     RESET = "\033[0m"
     BOLD = "\033[1m"
@@ -89,16 +104,16 @@ class Colors:
     GRAY = "\033[90m"
 
 
-def use_color() -> bool:
-    """Check if color output should be used.
+def use_colour() -> bool:
+    """Check if colour output should be used.
 
-    Colors are disabled if:
+    Colours are disabled if:
     - NO_COLOR environment variable is set
     - CI environment variable is set
     - stdout is not a TTY
 
     Returns:
-        True if color should be used
+        True if colour should be used
     """
     if os.environ.get("NO_COLOR"):
         return False
@@ -109,23 +124,41 @@ def use_color() -> bool:
     return True
 
 
-def colorize(text: str, color: str, force: bool = False) -> str:
-    """Wrap text in ANSI color codes if appropriate.
+def colourize(text: str, colour: str, force: bool = False) -> str:
+    """Wrap text in ANSI colour codes if appropriate.
 
     Args:
-        text: Text to colorize
-        color: Color name (e.g., 'RED', 'GREEN')
-        force: Force color even if normally disabled
+        text: Text to colourize
+        colour: Colour name (e.g., 'RED', 'GREEN')
+        force: Force colour even if normally disabled
 
     Returns:
-        Colorized text or plain text
+        Colourized text or plain text
     """
-    if not force and not use_color():
+    if not force and not use_colour():
         return text
-    color_code = getattr(Colors, color.upper(), "")
-    if color_code:
-        return f"{color_code}{text}{Colors.RESET}"
+    colour_code = getattr(Colours, colour.upper(), "")
+    if colour_code:
+        return f"{colour_code}{text}{Colours.RESET}"
     return text
+
+
+def print_inplace(text: str) -> None:
+    """Print text on the current line, overwriting previous content."""
+    if not sys.stdout.isatty():
+        print(text)
+        return
+
+    # \r moves to start of line, \033[K clears to the end
+    sys.stdout.write(f"\r{text}\033[K")
+    sys.stdout.flush()
+
+
+def clear_inplace() -> None:
+    """Clear the current inplace line and move cursor back to start."""
+    if sys.stdout.isatty():
+        sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
 
 
 def format_bytes(size: int) -> str:
@@ -148,16 +181,12 @@ def die(message: str, hint: str | None = None, exit_code: int = 1) -> int:
     Returns:
         Exit code (for testing purposes)
     """
-    error_msg = f"Error: {message}"
-    if use_color():
-        error_msg = f"{Colors.RED}{error_msg}{Colors.RESET}"
-    print(error_msg, file=sys.stderr)
+    prefix = colourize("Vlfs Error:", "RED")
+    print(f"{prefix} {message}", file=sys.stderr)
 
     if hint:
-        hint_msg = f"Hint: {hint}"
-        if use_color():
-            hint_msg = f"{Colors.YELLOW}{hint_msg}{Colors.RESET}"
-        print(hint_msg, file=sys.stderr)
+        hint_prefix = colourize("Hint:", "YELLOW")
+        print(f"  {hint_prefix} {hint}", file=sys.stderr)
 
     logger.error(f"Exited with code {exit_code}: {message}")
     if hint:
@@ -301,9 +330,10 @@ def retry(
 # =============================================================================
 
 
-def hash_file(path: Path) -> tuple[str, int, float]:
+def hash_file(path: Path, verbose: bool = True) -> tuple[str, int, float]:
     """Compute SHA256 hash of file, return (hex_digest, size, mtime)."""
-    print(f"  Hashing {path.name}...")
+    if verbose:
+        print_inplace(f"  Hashing {path.name}...")
     sha256 = hashlib.sha256()
     size = 0
 
@@ -341,14 +371,18 @@ def hash_files_parallel(
     errors: dict[Path, Exception] = {}
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_map = {executor.submit(hash_file, path): path for path in paths}
-        for future in as_completed(future_map):
+        # Suppress internal hash_file printing to manage it ourselves
+        future_map = {executor.submit(hash_file, path, verbose=False): path for path in paths}
+        for i, future in enumerate(as_completed(future_map), 1):
             path = future_map[future]
+            print_inplace(f"  Hashing files [{i}/{len(paths)}]... {path.name}")
             try:
                 results[path] = future.result()
             except (OSError, IOError) as exc:
                 errors[path] = exc
 
+    # Final clear or newline
+    clear_inplace()
     return results, errors
 
 
@@ -388,12 +422,11 @@ def store_object(src_path: Path, cache_dir: Path, compression_level: int = 3) ->
         return object_key
 
     # Read, compress, and store atomically
-    print(f"  Compressing {src_path.name}...")
     data = src_path.read_bytes()
     compressed = compress_bytes(data, level=compression_level)
     
     ratio = (len(compressed) / len(data)) * 100 if len(data) > 0 else 100
-    print(f"  Stored in cache ({format_bytes(len(data))} -> {format_bytes(len(compressed))}, {ratio:.1f}%)")
+    # print(f"  Stored in cache ({format_bytes(len(data))} -> {format_bytes(len(compressed))}, {ratio:.1f}%)")
 
     atomic_write_bytes(object_path, compressed)
 
@@ -565,7 +598,7 @@ def warn_if_secrets_in_repo(vlfs_dir: Path) -> None:
     content = config_path.read_text()
     if "client_secret" in content or "secret_access_key" in content:
         print(
-            colorize("Warning: Secrets detected in .vlfs/config.toml", "YELLOW"),
+            colourize("Warning: Secrets detected in .vlfs/config.toml", "YELLOW"),
             file=sys.stderr,
         )
         print("Move secrets to ~/.config/vlfs/config.toml", file=sys.stderr)
@@ -1034,7 +1067,8 @@ def download_http(url: str, dest: Path, timeout: float = 60) -> None:
     import urllib.request
     import urllib.error
 
-    print(f"  Downloading {url}...")
+    # Show filename instead of full path for cleaner output
+    print_inplace(f"  Downloading {url.split('/')[-1]}...")
 
     # Use a browser-like User-Agent to avoid 403 Forbidden from CDNs like Cloudflare
     headers = {
@@ -1140,14 +1174,14 @@ def auth_gdrive(vlfs_dir: Path) -> int:
     config_file = user_dir / "rclone.conf"
     token_file = user_dir / "gdrive-token.json"
 
-    print("Setting up Google Drive authentication...")
-    print("A browser will open for you to authorise access to Google Drive.")
+    print(f"{colourize('Vlfs', 'CYAN')} Setting up Google Drive authentication...")
+    print("  A browser will open for you to authorise access to Google Drive.")
     print()
 
     try:
         # Use rclone config create with built-in OAuth
         # This creates a remote named 'gdrive' of type 'drive'
-        print("Launching browser for authentication...")
+        print("  Launching browser for authentication...")
         subprocess.run(
             [
                 "rclone",
@@ -1408,17 +1442,18 @@ def materialize_workspace(
             continue  # Will be missing
 
         if dry_run:
-            print(f"[DRY-RUN] Would write {rel_path} ({format_bytes(len(data))})")
+            print_inplace(f"  [DRY-RUN] Restoring {rel_path}...")
             files_written += 1
             bytes_written += len(data)
             continue
 
         # Write atomically
-        print(f"  Restoring {rel_path}...")
+        print_inplace(f"  Restoring {rel_path}...")
         atomic_write_bytes(file_path, data)
         files_written += 1
         bytes_written += len(data)
 
+    clear_inplace()
     return files_written, bytes_written, skipped_files
 
 
@@ -1625,19 +1660,24 @@ def cmd_list(
         print(json.dumps(output_list, indent=2))
         return 0
 
+    print(f"{colourize('Vlfs', 'CYAN')} Tracked files")
+
     if long_format:
         # Calculate column widths
         # Hash (8 chars), Size (10 chars), Remote (8 chars), Path (remainder)
-        print(f"{'HASH':<8} {'SIZE':<10} {'REMOTE':<8} {'PATH'}")
-        print("-" * 60)
+        header = f"  {'HASH':<8} {'SIZE':<10} {'REMOTE':<8} {'PATH'}"
+        print(colourize(header, "GRAY"))
+        print(colourize("  " + "-" * (len(header) + 20), "GRAY"))
         for rel_path, entry in filtered_entries:
-            h = entry.get("hash", "")[:8]
-            s = format_bytes(entry.get("size", 0))
+            h = colourize(entry.get("hash", "")[:8], "CYAN")
+            s = entry.get("size", 0)
+            # Use gray for size units if possible, but keep it simple
+            s_str = format_bytes(s)
             r = entry.get("remote", "r2")
-            print(f"{h:<8} {s:<10} {r:<8} {rel_path}")
+            print(f"  {h} {s_str:<10} {r:<8} {rel_path}")
     else:
         for rel_path, _ in filtered_entries:
-            print(rel_path)
+            print(f"  {rel_path}")
 
     return 0
 
@@ -1662,38 +1702,48 @@ def cmd_status(
         print(json.dumps(status, indent=2))
         return 0
 
+    print(f"{colourize('Vlfs', 'CYAN', force_color)} status")
+
     total_changes = (
-        len(status["missing"]) + len(status["modified"]) + len(status["extra"])
+        len(status["missing"]) + len(status["modified"])
     )
 
     if total_changes == 0:
-        print(colorize("Workspace is up to date", "GREEN", force_color))
+        print(colourize("  Workspace is up to date", "GREEN", force_color))
     else:
         if status["missing"]:
             print(
-                f"{colorize('Missing:', 'RED', force_color)} {len(status['missing'])}"
+                f"  {colourize('Missing:', 'RED', force_color)} {len(status['missing'])}"
             )
             for path in status["missing"][:10]:  # Show first 10
-                print(f"  {colorize(path, 'RED', force_color)}")
+                print(f"    {colourize(path, 'RED', force_color)}")
             if len(status["missing"]) > 10:
-                print(f"  ... and {len(status['missing']) - 10} more")
+                print(f"    ... and {len(status['missing']) - 10} more")
         if status["modified"]:
             print(
-                f"{colorize('Modified:', 'YELLOW', force_color)} {len(status['modified'])}"
+                f"  {colourize('Modified:', 'YELLOW', force_color)} {len(status['modified'])}"
             )
             for path in status["modified"][:10]:
-                print(f"  {colorize(path, 'YELLOW', force_color)}")
+                print(f"    {colourize(path, 'YELLOW', force_color)}")
             if len(status["modified"]) > 10:
-                print(f"  ... and {len(status['modified']) - 10} more")
-        if status["extra"]:
-            print(
-                f"{colorize('Extra (untracked):', 'MAGENTA', force_color)} {len(status['extra'])}"
-            )
-            for path in status["extra"][:10]:
-                print(f"  {colorize(path, 'MAGENTA', force_color)}")
-            if len(status["extra"]) > 10:
-                print(f"  ... and {len(status['extra']) - 10} more")
-            print(f"  (Add with: vlfs push --glob ...)")
+                print(f"    ... and {len(status['modified']) - 10} more")
+
+    # Cache Statistics
+    print()
+    print(f"  {colourize('Cache Statistics:', 'CYAN')}")
+    total_logical = 0
+    total_compressed = 0
+    entries = index.get("entries", {})
+    
+    for entry in entries.values():
+        total_logical += entry.get("size", 0)
+        total_compressed += entry.get("compressed_size", 0)
+        
+    ratio = (total_compressed / total_logical * 100) if total_logical > 0 else 100
+    
+    print(f"    Tracked files: {len(entries)}")
+    print(f"    Logical size:  {format_bytes(total_logical)}")
+    print(f"    Physical size: {format_bytes(total_compressed)} ({ratio:.1f}% ratio)")
 
     return 0
 
@@ -1705,6 +1755,7 @@ def cmd_pull(
     force: bool = False,
     dry_run: bool = False,
     pattern: str | None = None,
+    restore: bool = False,
 ) -> int:
     """Execute pull command with support for mixed remotes."""
     try:
@@ -1742,112 +1793,121 @@ def cmd_pull(
             return 0
             
         index["entries"] = filtered_entries
-        print(f"Pulling {len(filtered_entries)} files matching '{pattern}'...")
+        if restore:
+            print(f"{colourize('Vlfs', 'CYAN')} Restoring {len(filtered_entries)} files matching '{pattern}' from cache...")
+        else:
+            print(f"{colourize('Vlfs', 'CYAN')} Pulling {len(filtered_entries)} files matching '{pattern}' from remote...")
 
     # Load merged config
     config = load_merged_config(vlfs_dir)
-
-    # Check if we can use HTTP download for R2
-    r2_public_url = config.get("remotes", {}).get("r2", {}).get("public_base_url")
-    r2_bucket = config.get("remotes", {}).get("r2", {}).get("bucket", "vlfs")
-    drive_bucket = config.get("remotes", {}).get("gdrive", {}).get("bucket", "vlfs")
-
-    # Update rclone config with R2 settings only if needed (push or no public URL)
-    # But for pull, if we have public URL, we don't strictly need rclone config
-
-    # Group objects by remote
-    remote_groups = group_objects_by_remote(index)
-
-    # Validate connection only if not using HTTP
-    if not dry_run and "r2" in remote_groups and not r2_public_url:
-        try:
-            validate_r2_connection(bucket=r2_bucket)
-        except (RcloneError, ConfigError) as e:
-            print(f"Error: {e}", file=sys.stderr)
-            if isinstance(e, ConfigError):
-                print(
-                    "Hint: Set R2 credentials via RCLONE_CONFIG_R2_* env vars",
-                    file=sys.stderr,
-                )
-            return 1
 
     total_downloaded = 0
     total_objects = 0
     skipped_private_files = 0
 
-    # Build map of object key -> compressed size for progress reporting
-    key_sizes = {}
-    for entry in index.get("entries", {}).values():
-        k = entry.get("object_key")
-        s = entry.get("compressed_size", 0)
-        if k:
-            key_sizes[k] = s
+    if not restore:
+        if not pattern:
+             print(f"{colourize('Vlfs', 'CYAN')} Pulling all files from remote...")
+        # Check if we can use HTTP download for R2
+        r2_public_url = config.get("remotes", {}).get("r2", {}).get("public_base_url")
+        r2_bucket = config.get("remotes", {}).get("r2", {}).get("bucket", "vlfs")
+        drive_bucket = config.get("remotes", {}).get("gdrive", {}).get("bucket", "vlfs")
 
-    for remote, objects in remote_groups.items():
-        object_keys = [obj[0] for obj in objects]
-        total_objects += len(object_keys)
+        # Update rclone config with R2 settings only if needed (push or no public URL)
+        # But for pull, if we have public URL, we don't strictly need rclone config
 
-        # Check Google Drive auth before attempting download
-        if remote == "gdrive":
-            can_access_drive = False
+        # Group objects by remote
+        remote_groups = group_objects_by_remote(index)
+
+        # Validate connection only if not using HTTP
+        if not dry_run and "r2" in remote_groups and not r2_public_url:
             try:
-                can_access_drive = has_drive_token()
-            except RuntimeError:
-                can_access_drive = False  # Treat CI-restriction as "no token"
-            
-            if not can_access_drive:
-                # No auth available - skip private files (summary will be shown at end)
-                skipped_private_files += len(object_keys)
-                continue
+                validate_r2_connection(bucket=r2_bucket)
+            except (RcloneError, ConfigError) as e:
+                print(f"Error: {e}", file=sys.stderr)
+                if isinstance(e, ConfigError):
+                    print(
+                        "Hint: Set R2 credentials via RCLONE_CONFIG_R2_* env vars",
+                        file=sys.stderr,
+                    )
+                return 1
 
-        try:
-            downloaded = _download_remote_group(
-                remote,
-                object_keys,
-                cache_dir,
-                key_sizes,
-                r2_public_url,
-                dry_run,
-                r2_bucket=r2_bucket,
-                drive_bucket=drive_bucket,
-                force=force,
-            )
-        except (RcloneError, ConfigError) as e:
-            print(f"Error downloading from {remote}: {e}", file=sys.stderr)
-            if isinstance(e, ConfigError):
-                print(
-                    "Hint: Set R2 credentials via RCLONE_CONFIG_R2_* env vars",
-                    file=sys.stderr,
+        # Build map of object key -> compressed size for progress reporting
+        key_sizes = {}
+        for entry in index.get("entries", {}).values():
+            k = entry.get("object_key")
+            s = entry.get("compressed_size", 0)
+            if k:
+                key_sizes[k] = s
+
+        for remote, objects in remote_groups.items():
+            object_keys = [obj[0] for obj in objects]
+            total_objects += len(object_keys)
+
+            # Check Google Drive auth before attempting download
+            if remote == "gdrive":
+                can_access_drive = False
+                try:
+                    can_access_drive = has_drive_token()
+                except RuntimeError:
+                    can_access_drive = False  # Treat CI-restriction as "no token"
+                
+                if not can_access_drive:
+                    # No auth available - skip private files (summary will be shown at end)
+                    skipped_private_files += len(object_keys)
+                    continue
+
+            try:
+                downloaded = _download_remote_group(
+                    remote,
+                    object_keys,
+                    cache_dir,
+                    key_sizes,
+                    r2_public_url,
+                    dry_run,
+                    r2_bucket=r2_bucket,
+                    drive_bucket=drive_bucket,
+                    force=force,
                 )
-            return 1
+            except (RcloneError, ConfigError) as e:
+                print(f"Error downloading from {remote}: {e}", file=sys.stderr)
+                if isinstance(e, ConfigError):
+                    print(
+                        "Hint: Set R2 credentials via RCLONE_CONFIG_R2_* env vars",
+                        file=sys.stderr,
+                    )
+                return 1
 
-        total_downloaded += downloaded
+            total_downloaded += downloaded
 
     # Materialize workspace
     files_written, bytes_written, skipped = materialize_workspace(
-        index, repo_root, cache_dir, force, dry_run
+        index, repo_root, cache_dir, force or restore, dry_run
     )
 
     if skipped:
         print(
-            f"Skipped {len(skipped)} files due to local modifications (use --force to overwrite):"
+            f"  {colourize('Skipped:', 'YELLOW')} {len(skipped)} files due to local modifications (use --force to overwrite):"
         )
         for path in skipped[:10]:
-            print(f"  {path}")
+            print(f"    {path}")
         if len(skipped) > 10:
-            print(f"  ... and {len(skipped) - 10} more")
+            print(f"    ... and {len(skipped) - 10} more")
 
     if dry_run:
         print(
-            f"[DRY-RUN] Would write {files_written} files ({format_bytes(bytes_written)})"
+            f"  {colourize('[DRY-RUN]', 'YELLOW')} Would write {files_written} files ({format_bytes(bytes_written)})"
         )
     else:
-        print(f"Wrote {files_written} files ({format_bytes(bytes_written)})")
+        if files_written > 0:
+            print(f"  {colourize('Success:', 'GREEN')} Restored {files_written} files ({format_bytes(bytes_written)})")
+        else:
+             print(f"  {colourize('Vlfs', 'CYAN')} All files already up to date.")
 
     # Report skipped private files due to missing Google Drive auth
     if skipped_private_files > 0:
         print(
-            f"Skipped {skipped_private_files} private files (Google Drive auth required)."
+            f"  {colourize('Note:', 'YELLOW')} Skipped {skipped_private_files} private files (Google Drive auth required)."
         )
 
     return 0
@@ -1885,14 +1945,12 @@ def cmd_push(
         if targets:
             all_targets.extend(targets)
         else:
-            print(f"Error: No files found matching: {path}", file=sys.stderr)
-            # return 1 # Don't return, keep processing other args? 
-            # If user does 'vlfs push a b', and a exists but b doesn't.
-            # Usually we warn and continue or fail at end.
-            pass
+            die(f"No files found matching: {path}")
 
     if not all_targets:
         return 1
+
+    print(f"{colourize('Vlfs', 'CYAN')} Pushing files to {'private' if private else 'public'} storage...")
 
     targets = all_targets
     # ... rest of function uses targets
@@ -2124,7 +2182,7 @@ def cmd_lookup(repo_root: Path, vlfs_dir: Path, query: str) -> int:
         remote = entry.get("remote", "unknown")
         size = entry.get("size", 0)
         obj_key = entry.get("object_key", "n/a")
-        print(f"  {colorize(rel_path, 'CYAN')}")
+        print(f"  {colourize(rel_path, 'CYAN')}")
         print(f"    Hash:   {entry.get('hash')}")
         print(f"    Object: {obj_key} ({remote})")
         print(f"    Size:   {format_bytes(size)}")
@@ -2261,21 +2319,21 @@ def cmd_verify(
         issues = len(corrupted) + len(missing_local) + len(missing_remote)
 
         if issues == 0:
-            print(colorize(f"All {total} files verified OK", "GREEN"))
+            print(colourize(f"All {total} files verified OK", "GREEN"))
         else:
             print(
-                f"Verification: {colorize(f'{total - issues} OK', 'GREEN')}, "
-                + f"{colorize(f'{len(corrupted)} corrupted', 'RED')}, "
-                + f"{colorize(f'{len(missing_local)} missing local', 'YELLOW')}, "
-                + f"{colorize(f'{len(missing_remote)} missing remote', 'RED')}"
+                f"Verification: {colourize(f'{total - issues} OK', 'GREEN')}, "
+                + f"{colourize(f'{len(corrupted)} corrupted', 'RED')}, "
+                + f"{colourize(f'{len(missing_local)} missing local', 'YELLOW')}, "
+                + f"{colourize(f'{len(missing_remote)} missing remote', 'RED')}"
             )
 
             for path in corrupted[:5]:
-                print(f"  {colorize('CORRUPTED', 'RED')} {path}")
+                print(f"  {colourize('CORRUPTED', 'RED')} {path}")
             for path in missing_local[:5]:
-                print(f"  {colorize('MISSING LOCAL', 'YELLOW')} {path}")
+                print(f"  {colourize('MISSING LOCAL', 'YELLOW')} {path}")
             for path in missing_remote[:5]:
-                print(f"  {colorize('MISSING REMOTE', 'RED')} {path}")
+                print(f"  {colourize('MISSING REMOTE', 'RED')} {path}")
             
             combined_count = len(corrupted) + len(missing_local) + len(missing_remote)
             if combined_count > 15:
@@ -2586,7 +2644,7 @@ def cmd_repair(
     repo_root: Path, vlfs_dir: Path, cache_dir: Path, dry_run: bool = False
 ) -> int:
     """Execute repair command that fixes common issues."""
-    print(colorize("Starting VLFS Repair...", "CYAN"))
+    print(colourize("Starting VLFS Repair...", "CYAN"))
 
     # 1. Clean local cache (remove orphans)
     print("\n[1/3] Cleaning local cache...")
@@ -2612,7 +2670,7 @@ def cmd_repair(
         except Exception as e:
             print(f"  Warning: Final sync failed: {e}", file=sys.stderr)
 
-    print(colorize("\nRepair complete!", "GREEN"))
+    print(colourize("\nRepair complete!", "GREEN"))
     return 0
 
 
@@ -2942,6 +3000,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Show what would be done without doing it",
     )
+    pull_parser.add_argument(
+        "--restore",
+        action="store_true",
+        help="Restore files from local cache only (no downloading)",
+    )
 
     # push command
     push_parser = subparsers.add_parser("push", help="Upload file(s) to remote")
@@ -3155,6 +3218,7 @@ def main(argv: list[str] | None = None) -> int:
             getattr(args, "force", False),
             dry_run,
             getattr(args, "path", None),
+            getattr(args, "restore", False),
         )
     elif args.command == "push":
         if args.all:

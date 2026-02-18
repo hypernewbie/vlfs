@@ -289,3 +289,47 @@ class TestMaterializeWorkspace:
         files_written, _, _ = vlfs.materialize_workspace(index, repo_root, cache_dir)
         
         assert files_written == 0  # Skipped missing object
+
+    def test_pull_restore_skips_downloads(self, repo_root, monkeypatch, rclone_mock):
+        """pull --restore should materialize from cache and NOT call rclone."""
+        vlfs_dir = repo_root / '.vlfs'
+        cache_dir = repo_root / '.vlfs-cache'
+        
+        # Setup cache with an object
+        test_file = repo_root / 'restored.txt'
+        content = b'content'
+        test_file.write_bytes(content)
+        
+        # Get hash before unlinking
+        real_hash, _, _ = vlfs.hash_file(test_file)
+        
+        object_key = vlfs.store_object(test_file, cache_dir)
+        test_file.unlink() # Workspace file is gone
+        
+        index = {
+            'version': 1,
+            'entries': {
+                'restored.txt': {
+                    'object_key': object_key,
+                    'hash': real_hash,
+                    'remote': 'r2'
+                }
+            }
+        }
+        vlfs.write_index(vlfs_dir, index)
+        
+        # Mock rclone to fail if called
+        def fail_handler(cmd):
+            # Allow ls for checking existence if needed by other parts, 
+            # but cmd_pull with --restore shouldn't call it.
+            pytest.fail(f"rclone should NOT be called during pull --restore! Called: {cmd}")
+            
+        rclone_mock({'_handler': fail_handler})
+        
+        # Run pull --restore
+        monkeypatch.chdir(repo_root)
+        result = vlfs.main(['pull', '--restore'])
+        
+        assert result == 0
+        assert (repo_root / 'restored.txt').exists()
+        assert (repo_root / 'restored.txt').read_bytes() == content
