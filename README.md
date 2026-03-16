@@ -137,8 +137,11 @@ Mostly. Hashing and downloading (HTTP/Rclone) are parallel/multithreaded. Upload
 
 ### Installing rclone
 
+> [!IMPORTANT]
+> **Windows Warning:** `winget` often fails to create the required symlinks when run from PowerShell. To ensure `rclone` is correctly added to your PATH, run the installation from an **Administrator Command Prompt (cmd.exe)**.
+
 ```bash
-# Windows
+# Windows (Run as Administrator in cmd.exe)
 winget install Rclone.Rclone
 
 # macOS
