@@ -54,6 +54,8 @@ python vlfs.py verify
 python vlfs.py clean
 ```
 
+Most commands now keep default output intentionally terse with bracketed progress and a final summary line. Use `-v` when you want the older step-by-step detail and transfer chatter.
+
 ## Configuration
 
 `.vlfs/config.toml` (committed):

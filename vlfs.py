@@ -161,6 +161,41 @@ def clear_inplace() -> None:
         sys.stdout.flush()
 
 
+class ProgressTracker:
+    """Small helper for concise CLI progress output."""
+
+    def __init__(self, total: int, verbose: bool = False):
+        self.total = total
+        self.verbose = verbose
+        self.current = 0
+        self._use_inplace = not verbose and sys.stdout.isatty()
+
+    def advance(self, message: str) -> None:
+        """Advance progress by one item."""
+        if self.total <= 0:
+            return
+
+        self.current += 1
+        line = f"[{self.current}/{self.total}] {message}"
+        if self._use_inplace:
+            print_inplace(line)
+        elif self.verbose:
+            print(f"  {line}")
+        else:
+            print(line)
+
+    def clear(self) -> None:
+        """Clear any inplace output."""
+        if self._use_inplace:
+            clear_inplace()
+
+    def done(self, summary: str, success: bool = True) -> None:
+        """Clear progress output and print a final summary line."""
+        self.clear()
+        marker = colourize("✓" if success else "✗", "GREEN" if success else "RED")
+        print(f"{marker} {summary}")
+
+
 def format_bytes(size: int) -> str:
     """Format byte size as human-readable string."""
     for unit in ["B", "KB", "MB", "GB", "TB"]:
@@ -168,6 +203,24 @@ def format_bytes(size: int) -> str:
             return f"{size:.1f}{unit}"
         size /= 1024
     return f"{size:.1f}PB"
+
+
+def pluralize(count: int, singular: str, plural: str | None = None) -> str:
+    """Return the singular or plural form for count."""
+    if count == 1:
+        return singular
+    return plural if plural is not None else f"{singular}s"
+
+
+def format_compression_summary(original: int, compressed: int) -> str:
+    """Format an original/compressed size summary."""
+    if original <= 0:
+        return format_bytes(compressed)
+    if original == compressed:
+        return format_bytes(original)
+
+    saved = max(0.0, 100.0 - (compressed / original * 100.0))
+    return f"{format_bytes(original)} → {format_bytes(compressed)}, {saved:.0f}%"
 
 
 def die(message: str, hint: str | None = None, exit_code: int = 1) -> int:
@@ -350,7 +403,7 @@ def hash_file(path: Path, verbose: bool = True) -> tuple[str, int, float]:
 
 
 def hash_files_parallel(
-    paths: list[Path], max_workers: int | None = None
+    paths: list[Path], max_workers: int | None = None, verbose: bool = True
 ) -> tuple[dict[Path, tuple[str, int, float]], dict[Path, Exception]]:
     """Hash files in parallel using a thread pool.
 
@@ -365,24 +418,24 @@ def hash_files_parallel(
         cpu_count = os.cpu_count() or 4
         max_workers = min(32, cpu_count * 2)
 
-    print(f"  Hashing {len(paths)} files in parallel...")
-
     results: dict[Path, tuple[str, int, float]] = {}
     errors: dict[Path, Exception] = {}
+    tracker = ProgressTracker(len(paths), verbose=False) if verbose else None
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Suppress internal hash_file printing to manage it ourselves
         future_map = {executor.submit(hash_file, path, verbose=False): path for path in paths}
-        for i, future in enumerate(as_completed(future_map), 1):
+        for future in as_completed(future_map):
             path = future_map[future]
-            print_inplace(f"  Hashing files [{i}/{len(paths)}]... {path.name}")
+            if tracker:
+                tracker.advance(path.name)
             try:
                 results[path] = future.result()
             except (OSError, IOError) as exc:
                 errors[path] = exc
 
-    # Final clear or newline
-    clear_inplace()
+    if tracker:
+        tracker.clear()
     return results, errors
 
 
@@ -413,7 +466,7 @@ def decompress_bytes(data: bytes) -> bytes:
 
 def store_object(src_path: Path, cache_dir: Path, compression_level: int = 3) -> str:
     """Store file in cache, return object key."""
-    hex_digest, _, _ = hash_file(src_path)
+    hex_digest, _, _ = hash_file(src_path, verbose=False)
     object_key = shard_path(hex_digest)
     object_path = cache_dir / "objects" / object_key
 
@@ -655,7 +708,8 @@ def run_rclone(
     # --s3-no-check-bucket prevents HeadBucket calls which fail on scoped keys
     cmd += ["--s3-no-check-bucket"]
 
-    print(f"  Running: {' '.join(cmd)}")
+    if logger.isEnabledFor(logging.DEBUG):
+        print(f"  Running: {' '.join(cmd)}")
 
     run_env = None
     if env:
@@ -906,7 +960,8 @@ def validate_r2_connection(bucket: str = "vlfs") -> bool:
                 # Re-raise original error to prompt for env vars or config
                 raise
 
-    print(f"  Verifying R2 connection to bucket '{bucket}'...")
+    if logger.isEnabledFor(logging.DEBUG):
+        print(f"  Verifying R2 connection to bucket '{bucket}'...")
 
     # Test with ls command (less strict permissions than lsd)
     # We check for a dummy file. Even if it doesn't exist, ls returns 0.
@@ -960,7 +1015,8 @@ def delete_from_remote(
         print(f"[DRY-RUN] Would delete {remote}:{bucket}/{object_key}")
         return True
 
-    print(f"  Deleting from {remote}...")
+    if logger.isEnabledFor(logging.DEBUG):
+        print(f"  Deleting from {remote}...")
     try:
         run_rclone(
             ["deletefile", f"{remote}:{bucket}/{object_key}"], capture_output=False
@@ -972,7 +1028,11 @@ def delete_from_remote(
 
 
 def upload_to_r2(
-    local_path: Path, object_key: str, bucket: str = "vlfs", dry_run: bool = False
+    local_path: Path,
+    object_key: str,
+    bucket: str = "vlfs",
+    dry_run: bool = False,
+    verbose: bool = False,
 ) -> bool:
     """Upload a local file to R2.
 
@@ -997,7 +1057,10 @@ def upload_to_r2(
     remote_path = f"r2:{bucket}/{object_key}"
 
     def do_upload():
-        run_rclone(["copyto", str(local_path), remote_path, "-P"], capture_output=False)
+        cmd = ["copyto", str(local_path), remote_path]
+        if verbose:
+            cmd.append("-P")
+        run_rclone(cmd, capture_output=not verbose)
 
     retry(do_upload, attempts=3, base_delay=1.0)
     return True
@@ -1009,6 +1072,7 @@ def download_from_r2(
     bucket: str = "vlfs",
     dry_run: bool = False,
     force: bool = False,
+    verbose: bool = False,
 ) -> int:
     """Download multiple objects from R2 to cache.
 
@@ -1050,11 +1114,12 @@ def download_from_r2(
                 files_from_path,
                 "--transfers",
                 "8",
-                "-P",
             ]
+            if verbose:
+                cmd.append("-P")
             if force:
                 cmd.append("--ignore-times")
-            run_rclone(cmd, capture_output=False)
+            run_rclone(cmd, capture_output=not verbose)
 
         retry(do_download, attempts=3, base_delay=1.0)
         return len(object_keys)
@@ -1062,13 +1127,13 @@ def download_from_r2(
         os.unlink(files_from_path)
 
 
-def download_http(url: str, dest: Path, timeout: float = 60) -> None:
+def download_http(url: str, dest: Path, timeout: float = 60, verbose: bool = True) -> None:
     """Download URL to dest atomically."""
     import urllib.request
     import urllib.error
 
-    # Show filename instead of full path for cleaner output
-    print_inplace(f"  Downloading {url.split('/')[-1]}...")
+    if verbose:
+        print_inplace(f"  Downloading {url.split('/')[-1]}...")
 
     # Use a browser-like User-Agent to avoid 403 Forbidden from CDNs like Cloudflare
     headers = {
@@ -1100,6 +1165,8 @@ def download_from_r2_http(
     base_url: str,
     dry_run: bool = False,
     force: bool = False,
+    verbose: bool = False,
+    tracker: ProgressTracker | None = None,
 ) -> int:
     """Download objects via HTTP (no auth required)."""
     downloaded = 0
@@ -1116,17 +1183,25 @@ def download_from_r2_http(
             return True
 
         try:
-            download_http(url, dest)
+            download_http(url, dest, verbose=False)
             return True
         except Exception as e:
             print(f"Error downloading {url}: {e}", file=sys.stderr)
             return False
 
     with ThreadPoolExecutor(max_workers=8) as executor:
-        futures = [executor.submit(_download_one, key) for key in object_keys]
-        for future in as_completed(futures):
+        future_map = {executor.submit(_download_one, key): key for key in object_keys}
+        for future in as_completed(future_map):
+            key = future_map[future]
             if future.result():
                 downloaded += 1
+                if tracker:
+                    tracker.advance(key)
+                elif verbose:
+                    print(f"  Downloaded {key}")
+
+    if tracker:
+        tracker.clear()
 
     return downloaded
 
@@ -1231,7 +1306,11 @@ def auth_gdrive(vlfs_dir: Path) -> int:
 
 
 def upload_to_drive(
-    local_path: Path, object_key: str, bucket: str = "vlfs", dry_run: bool = False
+    local_path: Path,
+    object_key: str,
+    bucket: str = "vlfs",
+    dry_run: bool = False,
+    verbose: bool = False,
 ) -> bool:
     """Upload a local file to Google Drive with rate limiting.
 
@@ -1251,19 +1330,22 @@ def upload_to_drive(
     remote_path = f"gdrive:{bucket}/{object_key}"
 
     def do_upload():
-        print(f"  Uploading {local_path.name} to Drive...")
+        if verbose:
+            print(f"  Uploading {local_path.name} to Drive...")
+        cmd = [
+            "copyto",
+            str(local_path),
+            remote_path,
+            "--transfers",
+            "1",
+            "--drive-chunk-size",
+            "8M",
+        ]
+        if verbose:
+            cmd.append("-P")
         run_rclone(
-            [
-                "copyto",
-                str(local_path),
-                remote_path,
-                "--transfers",
-                "1",
-                "--drive-chunk-size",
-                "8M",
-                "-P",
-            ],
-            capture_output=False,
+            cmd,
+            capture_output=not verbose,
         )
 
     # Use more retries for Drive due to rate limiting
@@ -1298,6 +1380,7 @@ def download_from_drive(
     bucket: str = "vlfs",
     dry_run: bool = False,
     force: bool = False,
+    verbose: bool = False,
 ) -> int:
     """Download multiple objects from Drive to cache with rate limiting.
 
@@ -1337,11 +1420,12 @@ def download_from_drive(
                 "1",
                 "--drive-chunk-size",
                 "8M",
-                "-P",
             ]
+            if verbose:
+                cmd.append("-P")
             if force:
                 cmd.append("--ignore-times")
-            run_rclone(cmd, capture_output=False)
+            run_rclone(cmd, capture_output=not verbose)
 
         retry(do_download, attempts=5, base_delay=2.0)
         return len(object_keys)
@@ -1393,6 +1477,7 @@ def materialize_workspace(
     cache_dir: Path,
     force: bool = False,
     dry_run: bool = False,
+    verbose: int = 0,
 ) -> tuple[int, int, list[str]]:
     """Decompress objects from cache into workspace.
 
@@ -1410,6 +1495,7 @@ def materialize_workspace(
     files_written = 0
     bytes_written = 0
     skipped_files = []
+    to_write: list[tuple[str, Path, str]] = []
 
     for rel_path, entry in entries.items():
         object_key = entry.get("object_key")
@@ -1422,10 +1508,9 @@ def materialize_workspace(
         # Check if file exists
         if file_path.exists() and not force:
             try:
-                hex_digest, _, _ = hash_file(file_path)
+                hex_digest, _, _ = hash_file(file_path, verbose=False)
                 # If matches target, we are good (already up to date)
                 if hex_digest == entry.get("hash"):
-                    print(f"  Skipping {rel_path} (up to date)")
                     continue
 
                 # If different, and NOT force, skip
@@ -1435,25 +1520,33 @@ def materialize_workspace(
             except (OSError, IOError):
                 pass  # Will overwrite if we can't read/hash
 
+        to_write.append((rel_path, file_path, object_key))
+
+    tracker = ProgressTracker(len(to_write), verbose=bool(verbose)) if to_write else None
+
+    for rel_path, file_path, object_key in to_write:
         # Load from cache
         try:
             data = load_object(object_key, cache_dir)
         except (OSError, IOError):
             continue  # Will be missing
 
+        if tracker:
+            prefix = "[DRY-RUN] " if dry_run else ""
+            tracker.advance(f"{prefix}{rel_path}")
+
         if dry_run:
-            print_inplace(f"  [DRY-RUN] Restoring {rel_path}...")
             files_written += 1
             bytes_written += len(data)
             continue
 
         # Write atomically
-        print_inplace(f"  Restoring {rel_path}...")
         atomic_write_bytes(file_path, data)
         files_written += 1
         bytes_written += len(data)
 
-    clear_inplace()
+    if tracker:
+        tracker.clear()
     return files_written, bytes_written, skipped_files
 
 
@@ -1491,9 +1584,12 @@ def _find_untracked_files(
     return extra
 
 
-def compute_status(index: dict[str, Any], repo_root: Path) -> dict[str, list[str]]:
+def compute_status(
+    index: dict[str, Any], repo_root: Path, verbose: int = 0
+) -> dict[str, list[str]]:
     """Compare workspace against index, return categorized lists."""
-    print("Analyzing workspace status...")
+    if verbose:
+        print("Analyzing workspace status...")
     entries = index.get("entries", {})
 
     missing = []
@@ -1514,15 +1610,14 @@ def compute_status(index: dict[str, Any], repo_root: Path) -> dict[str, list[str
 
     if to_hash:
         paths_to_hash = [item[1] for item in to_hash]
-        print(f"  Hashing {len(paths_to_hash)} potential modifications...")
         if len(paths_to_hash) >= 8:
-            results, errors = hash_files_parallel(paths_to_hash)
+            results, errors = hash_files_parallel(paths_to_hash, verbose=bool(verbose))
         else:
             results = {}
             errors = {}
             for path in paths_to_hash:
                 try:
-                    results[path] = hash_file(path)
+                    results[path] = hash_file(path, verbose=False)
                 except (OSError, IOError) as exc:
                     errors[path] = exc
 
@@ -1544,7 +1639,8 @@ def compute_status(index: dict[str, Any], repo_root: Path) -> dict[str, list[str
     if not patterns:
         patterns = ["*.psd", "*.zip", "*.exe", "*.dll", "*.lib", "*.iso", "*.mp4"]
 
-    print("  Scanning for untracked files...")
+    if verbose:
+        print("  Scanning for untracked files...")
     extra = _find_untracked_files(repo_root, entries, patterns)
 
     return {"missing": missing, "modified": modified, "extra": extra}
@@ -1688,6 +1784,7 @@ def cmd_status(
     dry_run: bool = False,
     json_output: bool = False,
     force_color: bool = False,
+    verbose: int = 0,
 ) -> int:
     """Execute status command with enhanced output."""
     try:
@@ -1696,54 +1793,55 @@ def cmd_status(
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
-    status = compute_status(index, repo_root)
+    status = compute_status(index, repo_root, verbose=verbose)
 
     if json_output:
         print(json.dumps(status, indent=2))
         return 0
 
-    print(f"{colourize('Vlfs', 'CYAN', force_color)} status")
+    if verbose:
+        print(f"{colourize('Vlfs', 'CYAN', force_color)} status")
 
-    total_changes = (
-        len(status["missing"]) + len(status["modified"])
-    )
-
-    if total_changes == 0:
-        print(colourize("  Workspace is up to date", "GREEN", force_color))
-    else:
-        if status["missing"]:
-            print(
-                f"  {colourize('Missing:', 'RED', force_color)} {len(status['missing'])}"
-            )
-            for path in status["missing"][:10]:  # Show first 10
-                print(f"    {colourize(path, 'RED', force_color)}")
-            if len(status["missing"]) > 10:
-                print(f"    ... and {len(status['missing']) - 10} more")
-        if status["modified"]:
-            print(
-                f"  {colourize('Modified:', 'YELLOW', force_color)} {len(status['modified'])}"
-            )
-            for path in status["modified"][:10]:
-                print(f"    {colourize(path, 'YELLOW', force_color)}")
-            if len(status["modified"]) > 10:
-                print(f"    ... and {len(status['modified']) - 10} more")
-
-    # Cache Statistics
-    print()
-    print(f"  {colourize('Cache Statistics:', 'CYAN')}")
     total_logical = 0
     total_compressed = 0
     entries = index.get("entries", {})
-    
+
     for entry in entries.values():
         total_logical += entry.get("size", 0)
         total_compressed += entry.get("compressed_size", 0)
-        
-    ratio = (total_compressed / total_logical * 100) if total_logical > 0 else 100
-    
-    print(f"    Tracked files: {len(entries)}")
-    print(f"    Logical size:  {format_bytes(total_logical)}")
-    print(f"    Physical size: {format_bytes(total_compressed)} ({ratio:.1f}% ratio)")
+
+    total_changes = len(status["missing"]) + len(status["modified"])
+
+    if total_changes == 0:
+        marker = colourize("✓", "GREEN", force_color)
+        print(
+            f"{marker} Workspace is up to date ({len(entries)} {pluralize(len(entries), 'file')}, {format_bytes(total_logical)})"
+        )
+    else:
+        if status["missing"]:
+            print(
+                f"{colourize('Missing:', 'RED', force_color)} {len(status['missing'])} {pluralize(len(status['missing']), 'file')}"
+            )
+            for path in status["missing"][:10]:  # Show first 10
+                print(f"  {colourize(path, 'RED', force_color)}")
+            if len(status["missing"]) > 10:
+                print(f"  ... and {len(status['missing']) - 10} more")
+        if status["modified"]:
+            print(
+                f"{colourize('Modified:', 'YELLOW', force_color)} {len(status['modified'])} {pluralize(len(status['modified']), 'file')}"
+            )
+            for path in status["modified"][:10]:
+                print(f"  {colourize(path, 'YELLOW', force_color)}")
+            if len(status["modified"]) > 10:
+                print(f"  ... and {len(status['modified']) - 10} more")
+
+    if verbose:
+        ratio = (total_compressed / total_logical * 100) if total_logical > 0 else 100
+        print()
+        print(f"{colourize('Cache Statistics:', 'CYAN')}")
+        print(f"  Tracked files: {len(entries)}")
+        print(f"  Logical size:  {format_bytes(total_logical)}")
+        print(f"  Physical size: {format_bytes(total_compressed)} ({ratio:.1f}% ratio)")
 
     return 0
 
@@ -1756,6 +1854,7 @@ def cmd_pull(
     dry_run: bool = False,
     pattern: str | None = None,
     restore: bool = False,
+    verbose: int = 0,
 ) -> int:
     """Execute pull command with support for mixed remotes."""
     try:
@@ -1793,9 +1892,9 @@ def cmd_pull(
             return 0
             
         index["entries"] = filtered_entries
-        if restore:
+        if verbose and restore:
             print(f"{colourize('Vlfs', 'CYAN')} Restoring {len(filtered_entries)} files matching '{pattern}' from cache...")
-        else:
+        elif verbose:
             print(f"{colourize('Vlfs', 'CYAN')} Pulling {len(filtered_entries)} files matching '{pattern}' from remote...")
 
     # Load merged config
@@ -1806,7 +1905,7 @@ def cmd_pull(
     skipped_private_files = 0
 
     if not restore:
-        if not pattern:
+        if verbose and not pattern:
              print(f"{colourize('Vlfs', 'CYAN')} Pulling all files from remote...")
         # Check if we can use HTTP download for R2
         r2_public_url = config.get("remotes", {}).get("r2", {}).get("public_base_url")
@@ -1868,6 +1967,7 @@ def cmd_pull(
                     r2_bucket=r2_bucket,
                     drive_bucket=drive_bucket,
                     force=force,
+                    verbose=verbose,
                 )
             except (RcloneError, ConfigError) as e:
                 print(f"Error downloading from {remote}: {e}", file=sys.stderr)
@@ -1882,7 +1982,7 @@ def cmd_pull(
 
     # Materialize workspace
     files_written, bytes_written, skipped = materialize_workspace(
-        index, repo_root, cache_dir, force or restore, dry_run
+        index, repo_root, cache_dir, force or restore, dry_run, verbose=verbose
     )
 
     if skipped:
@@ -1896,13 +1996,14 @@ def cmd_pull(
 
     if dry_run:
         print(
-            f"  {colourize('[DRY-RUN]', 'YELLOW')} Would write {files_written} files ({format_bytes(bytes_written)})"
+            f"{colourize('[DRY-RUN]', 'YELLOW')} Would write {files_written} files ({format_bytes(bytes_written)})"
         )
     else:
         if files_written > 0:
-            print(f"  {colourize('Success:', 'GREEN')} Restored {files_written} files ({format_bytes(bytes_written)})")
+            marker = colourize("✓", "GREEN")
+            print(f"{marker} Restored {files_written} files ({format_bytes(bytes_written)})")
         else:
-             print(f"  {colourize('Vlfs', 'CYAN')} All files already up to date.")
+             print(f"{colourize('✓', 'GREEN')} All files already up to date.")
 
     # Report skipped private files due to missing Google Drive auth
     if skipped_private_files > 0:
@@ -1913,21 +2014,25 @@ def cmd_pull(
     return 0
 
 
-def cmd_push(
+def _run_push_batch(
     repo_root: Path,
     vlfs_dir: Path,
     cache_dir: Path,
-    paths: list[str],
+    files_to_push: list[Path],
     private: bool,
-    dry_run: bool = False,
+    dry_run: bool,
+    verbose: int = 0,
 ) -> int:
-    """Execute push command. Handles both files and directories."""
-    # Load merged config
+    """Push a prepared batch of files with concise progress output."""
+    if not files_to_push:
+        print("No files processed.")
+        return 0
+
     config = load_merged_config(vlfs_dir)
+    compression_level = config.get("defaults", {}).get("compression_level", 3)
     r2_bucket = config.get("remotes", {}).get("r2", {}).get("bucket", "vlfs")
     drive_bucket = config.get("remotes", {}).get("gdrive", {}).get("bucket", "vlfs")
 
-    # Validate connection before starting (unless dry run)
     if not dry_run and not private:
         if ensure_r2_auth() != 0:
             return 1
@@ -1938,6 +2043,71 @@ def cmd_push(
             print(f"Error: {e}", file=sys.stderr)
             return 1
 
+    tracker = ProgressTracker(len(files_to_push), verbose=bool(verbose))
+    failed: list[str] = []
+    updates: dict[str, dict[str, Any]] = {}
+    total_original = 0
+    total_compressed = 0
+
+    for file_path in files_to_push:
+        try:
+            rel_path = str(file_path.relative_to(repo_root)).replace(os.sep, "/")
+        except ValueError:
+            rel_path = str(file_path)
+
+        size = file_path.stat().st_size if file_path.exists() else 0
+        tracker.advance(f"{rel_path} ({format_bytes(size)})")
+
+        result, entry = _push_single_file_collect(
+            repo_root,
+            vlfs_dir,
+            cache_dir,
+            file_path,
+            private,
+            dry_run,
+            compression_level,
+            r2_bucket=r2_bucket,
+            drive_bucket=drive_bucket,
+            verbose=verbose,
+        )
+        if result != 0:
+            failed.append(rel_path)
+            continue
+
+        if entry:
+            updates.update(entry)
+            entry_data = next(iter(entry.values()))
+            if isinstance(entry_data, dict):
+                total_original += entry_data.get("size", 0)
+                total_compressed += entry_data.get("compressed_size", 0)
+
+    if failed:
+        tracker.done(
+            f"Failed to push {len(failed)} {pluralize(len(failed), 'file')}",
+            success=False,
+        )
+        return 1
+
+    if not dry_run and updates:
+        update_index_entries(vlfs_dir, updates)
+
+    action = "Would push" if dry_run else "Pushed"
+    tracker.done(
+        f"{action} {len(files_to_push)} {pluralize(len(files_to_push), 'file')} ({format_compression_summary(total_original, total_compressed)})"
+    )
+    return 0
+
+
+def cmd_push(
+    repo_root: Path,
+    vlfs_dir: Path,
+    cache_dir: Path,
+    paths: list[str],
+    private: bool,
+    dry_run: bool = False,
+    verbose: int = 0,
+) -> int:
+    """Execute push command. Handles both files and directories."""
     # Resolve target paths (supports globs)
     all_targets = []
     for path in paths:
@@ -1950,99 +2120,53 @@ def cmd_push(
     if not all_targets:
         return 1
 
-    print(f"{colourize('Vlfs', 'CYAN')} Pushing files to {'private' if private else 'public'} storage...")
-
-    targets = all_targets
-    # ... rest of function uses targets
-
-
     # Filter out non-existent files
     valid_targets = []
-    for t in targets:
+    for t in all_targets:
         if not t.exists():
             print(f"Error: File not found: {t}", file=sys.stderr)
             continue
         valid_targets.append(t)
-        
+
     if not valid_targets:
         return 1
 
-    # Load config for compression level
-    compression_level = config.get("defaults", {}).get("compression_level", 3)
-    
-    files_processed = 0
-    failed = []
-    updates: dict[str, dict[str, Any]] = {}
-
+    files_to_push: list[Path] = []
+    seen: set[Path] = set()
     for src_path in valid_targets:
-        # Handle directory
         if src_path.is_dir():
-            print(f"Scanning directory {src_path}...")
+            if verbose:
+                print(f"Scanning directory {src_path}...")
             files = _find_files_recursive(repo_root, src_path)
             if not files:
                 print(f"No files found in directory: {src_path}")
                 continue
-
-            print(f"Pushing {len(files)} files from {src_path}...")
             for file_path in files:
-                result, entry = _push_single_file_collect(
-                    repo_root,
-                    vlfs_dir,
-                    cache_dir,
-                    file_path,
-                    private,
-                    dry_run,
-                    compression_level,
-                    r2_bucket=r2_bucket,
-                    drive_bucket=drive_bucket,
-                )
-                files_processed += 1
-                if result != 0:
-                    try:
-                        failed.append(str(file_path.relative_to(repo_root)))
-                    except ValueError:
-                        failed.append(str(file_path))
-                elif entry:
-                    updates.update(entry)
-
+                if file_path not in seen:
+                    files_to_push.append(file_path)
+                    seen.add(file_path)
         else:
-            # Handle single file
-            result, entry = _push_single_file_collect(
-                repo_root,
-                vlfs_dir,
-                cache_dir,
-                src_path,
-                private,
-                dry_run,
-                compression_level,
-                r2_bucket=r2_bucket,
-                drive_bucket=drive_bucket,
-            )
-            files_processed += 1
-            if result != 0:
-                 try:
-                    failed.append(str(src_path.relative_to(repo_root)))
-                 except ValueError:
-                    failed.append(str(src_path))
-            elif entry:
-                updates.update(entry)
+            if src_path not in seen:
+                files_to_push.append(src_path)
+                seen.add(src_path)
 
-    if failed:
-        print(f"Failed to push {len(failed)} files")
-        return 1
+    if verbose:
+        print(
+            f"{colourize('Vlfs', 'CYAN')} Pushing files to {'private' if private else 'public'} storage..."
+        )
 
-    if files_processed == 0:
-        print("No files processed.")
-        return 0
-
-    if not dry_run and updates:
-        update_index_entries(vlfs_dir, updates)
-        
-    return 0
+    return _run_push_batch(
+        repo_root, vlfs_dir, cache_dir, files_to_push, private, dry_run, verbose
+    )
 
 
 def cmd_push_all(
-    repo_root: Path, vlfs_dir: Path, cache_dir: Path, private: bool, dry_run: bool
+    repo_root: Path,
+    vlfs_dir: Path,
+    cache_dir: Path,
+    private: bool,
+    dry_run: bool,
+    verbose: int = 0,
 ) -> int:
     """Push all new or modified files."""
     try:
@@ -2052,54 +2176,22 @@ def cmd_push_all(
         return 1
 
     # Find modified files
-    print("Scanning for modified files...")
-    status = compute_status(index, repo_root)
-    files_to_push = status["missing"] + status["modified"]
+    if verbose:
+        print("Scanning for modified files...")
+    status = compute_status(index, repo_root, verbose=verbose)
+    files_to_push = [
+        repo_root / rel_path.replace("/", os.sep)
+        for rel_path in status["missing"] + status["modified"]
+        if (repo_root / rel_path.replace("/", os.sep)).exists()
+    ]
 
     if not files_to_push:
-        print("All files are up to date")
+        print(f"{colourize('✓', 'GREEN')} All files are up to date")
         return 0
 
-    # Load config for compression level
-    config = load_merged_config(vlfs_dir)
-    compression_level = config.get("defaults", {}).get("compression_level", 3)
-    r2_bucket = config.get("remotes", {}).get("r2", {}).get("bucket", "vlfs")
-    drive_bucket = config.get("remotes", {}).get("gdrive", {}).get("bucket", "vlfs")
-
-    print(f"Pushing {len(files_to_push)} files...")
-
-    failed = []
-    updates: dict[str, dict[str, Any]] = {}
-    for rel_path in files_to_push:
-        file_path = repo_root / rel_path.replace("/", os.sep)
-        if not file_path.exists():
-            continue
-
-        result, entry = _push_single_file_collect(
-            repo_root,
-            vlfs_dir,
-            cache_dir,
-            file_path,
-            private,
-            dry_run,
-            compression_level,
-            r2_bucket=r2_bucket,
-            drive_bucket=drive_bucket,
-        )
-        if result != 0:
-            failed.append(rel_path)
-        elif entry:
-            updates.update(entry)
-
-    if failed:
-        print(f"Failed to push {len(failed)} files")
-        return 1
-
-    if not dry_run and updates:
-        update_index_entries(vlfs_dir, updates)
-
-    print(f"Successfully pushed {len(files_to_push)} files")
-    return 0
+    return _run_push_batch(
+        repo_root, vlfs_dir, cache_dir, files_to_push, private, dry_run, verbose
+    )
 
 
 def cmd_push_glob(
@@ -2109,50 +2201,23 @@ def cmd_push_glob(
     pattern: str,
     private: bool,
     dry_run: bool,
+    verbose: int = 0,
 ) -> int:
     """Push files matching a glob pattern."""
-    print(f"Searching for files matching '{pattern}'...")
+    if verbose:
+        print(f"Searching for files matching '{pattern}'...")
     matched_files = _collect_glob_matches(repo_root, pattern)
 
     if not matched_files:
         print(f"No files match pattern: {pattern}")
         return 0
 
-    print(f"Found {len(matched_files)} files matching '{pattern}'")
+    if verbose:
+        print(f"Found {len(matched_files)} files matching '{pattern}'")
 
-    # Load config for compression level
-    config = load_merged_config(vlfs_dir)
-    compression_level = config.get("defaults", {}).get("compression_level", 3)
-    r2_bucket = config.get("remotes", {}).get("r2", {}).get("bucket", "vlfs")
-    drive_bucket = config.get("remotes", {}).get("gdrive", {}).get("bucket", "vlfs")
-
-    failed = []
-    updates: dict[str, dict[str, Any]] = {}
-    for file_path in matched_files:
-        result, entry = _push_single_file_collect(
-            repo_root,
-            vlfs_dir,
-            cache_dir,
-            file_path,
-            private,
-            dry_run,
-            compression_level,
-            r2_bucket=r2_bucket,
-            drive_bucket=drive_bucket,
-        )
-        if result != 0:
-            failed.append(str(file_path.relative_to(repo_root)))
-        elif entry:
-            updates.update(entry)
-
-    if failed:
-        print(f"Failed to push {len(failed)} files")
-        return 1
-
-    if not dry_run and updates:
-        update_index_entries(vlfs_dir, updates)
-
-    return 0
+    return _run_push_batch(
+        repo_root, vlfs_dir, cache_dir, matched_files, private, dry_run, verbose
+    )
 
 
 def cmd_lookup(repo_root: Path, vlfs_dir: Path, query: str) -> int:
@@ -2198,6 +2263,7 @@ def cmd_verify(
     fix: bool = False,
     dry_run: bool = False,
     json_output: bool = False,
+    verbose: int = 0,
 ) -> int:
     """Execute verify command that re-hashes workspace files."""
     try:
@@ -2206,7 +2272,8 @@ def cmd_verify(
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
-    print("Verifying workspace integrity...")
+    if verbose and not json_output:
+        print("Verifying workspace integrity...")
     entries = index.get("entries", {})
     corrupted = []
     missing_local = []
@@ -2235,18 +2302,22 @@ def cmd_verify(
 
     if to_hash:
         paths_to_hash = [item[1] for item in to_hash]
-        print(f"  Hashing {len(paths_to_hash)} files...")
-        if len(paths_to_hash) >= 8:
+        if len(paths_to_hash) >= 8 and not json_output:
             logger.debug("Hashing %d files in parallel", len(paths_to_hash))
             results, errors = hash_files_parallel(paths_to_hash)
         else:
             results = {}
             errors = {}
-            for path in paths_to_hash:
+            tracker = ProgressTracker(len(paths_to_hash), verbose=bool(verbose)) if not json_output else None
+            for rel_path, path, _ in to_hash:
+                if tracker:
+                    tracker.advance(rel_path)
                 try:
-                    results[path] = hash_file(path)
+                    results[path] = hash_file(path, verbose=False)
                 except (OSError, IOError) as exc:
                     errors[path] = exc
+            if tracker:
+                tracker.clear()
 
         for rel_path, file_path, entry in to_hash:
             if file_path in errors:
@@ -2260,7 +2331,8 @@ def cmd_verify(
 
     missing_remote = []
     if remote:
-        print("Verifying remote object existence...")
+        if verbose and not json_output:
+            print("Verifying remote object existence...")
         # Group by remote
         remote_groups = {}
         for rel_path, entry in entries.items():
@@ -2319,7 +2391,7 @@ def cmd_verify(
         issues = len(corrupted) + len(missing_local) + len(missing_remote)
 
         if issues == 0:
-            print(colourize(f"All {total} files verified OK", "GREEN"))
+            print(f"{colourize('✓', 'GREEN')} All {total} files verified OK")
         else:
             print(
                 f"Verification: {colourize(f'{total - issues} OK', 'GREEN')}, "
@@ -2350,6 +2422,7 @@ def cmd_remove(
     force: bool = False,
     dry_run: bool = False,
     delete_file: bool = False,
+    verbose: int = 0,
 ) -> int:
     """Execute remove command."""
     try:
@@ -2470,7 +2543,6 @@ def cmd_remove(
     drive_bucket = config.get("remotes", {}).get("gdrive", {}).get("bucket", "vlfs")
 
     removed_count = 0
-    updates: dict[str, Any] = {} # Actually deletions, but we use this to batch update? No, just modify index dict directly and write once.
 
     # We need to modify 'entries' in place, but iterating over it while modifying is bad.
     # So we'll iterate over 'to_remove' and pop from 'entries'.
@@ -2478,8 +2550,10 @@ def cmd_remove(
     # But wait, we need to write index atomically. 
     # Let's modify a copy or just modify the loaded dict and write it back at end.
     
+    tracker = ProgressTracker(len(to_remove), verbose=bool(verbose))
+
     for rel_path in to_remove:
-        print(f"Removing {rel_path}...")
+        tracker.advance(rel_path)
         entry = entries[rel_path]
         object_key = entry.get("object_key")
         remote = entry.get("remote", "r2")
@@ -2490,18 +2564,20 @@ def cmd_remove(
             remaining_refs = object_ref_counts[object_key]
             
             if remaining_refs == 0:
-                print(f"  Object {object_key} is unreferenced.")
+                if verbose:
+                    print(f"    Object {object_key} is unreferenced.")
                 # Delete from cache
                 cache_obj_path = cache_dir / "objects" / object_key
                 if cache_obj_path.exists():
                     if dry_run:
                         print(f"[DRY-RUN] Would delete local cache object {object_key}")
                     else:
-                        print(f"  Deleting from cache...")
+                        if verbose:
+                            print("    Deleting from cache...")
                         try:
                             cache_obj_path.unlink()
                         except OSError as e:
-                            print(f"  Warning: Failed to delete cache object: {e}", file=sys.stderr)
+                            print(f"Warning: Failed to delete cache object: {e}", file=sys.stderr)
 
                 # Delete from remote
                 if remote == "gdrive":
@@ -2510,9 +2586,12 @@ def cmd_remove(
                     # For now rely on individual calls.
                     delete_from_remote("gdrive", drive_bucket, object_key, dry_run)
                 else: # r2
-                     delete_from_remote("r2", r2_bucket, object_key, dry_run)
+                    delete_from_remote("r2", r2_bucket, object_key, dry_run)
             else:
-                print(f"  Object {object_key} referenced by {remaining_refs} other files, keeping in storage.")
+                if verbose:
+                    print(
+                        f"    Object {object_key} referenced by {remaining_refs} other files, keeping in storage."
+                    )
 
         # Remove from index structure (in memory)
         if not dry_run:
@@ -2525,11 +2604,12 @@ def cmd_remove(
                 if dry_run:
                     print(f"[DRY-RUN] Would delete workspace file {ws_file}")
                 else:
-                    print(f"  Deleting workspace file...")
+                    if verbose:
+                        print("    Deleting workspace file...")
                     try:
                         ws_file.unlink()
                     except OSError as e:
-                         print(f"  Warning: Failed to delete workspace file: {e}", file=sys.stderr)
+                        print(f"Warning: Failed to delete workspace file: {e}", file=sys.stderr)
 
         removed_count += 1
 
@@ -2554,7 +2634,8 @@ def cmd_remove(
         # Cleanup empty dirs in cache
         _cleanup_empty_dirs(cache_dir / "objects")
 
-    print(f"Removed {removed_count} files.")
+    action = "Would remove" if dry_run else "Removed"
+    tracker.done(f"{action} {removed_count} {pluralize(removed_count, 'file')}")
     return 0
 
 
@@ -2564,6 +2645,7 @@ def cmd_clean(
     cache_dir: Path,
     dry_run: bool = False,
     yes: bool = False,
+    verbose: int = 0,
 ) -> int:
     """Execute clean command to remove unreferenced cache objects."""
     try:
@@ -2586,7 +2668,8 @@ def cmd_clean(
         print("Cache directory is empty")
         return 0
 
-    print("Scanning cache for orphaned objects...")
+    if verbose:
+        print("Scanning cache for orphaned objects...")
     to_delete = []
     total_size = 0
 
@@ -2599,7 +2682,7 @@ def cmd_clean(
                 total_size += obj_path.stat().st_size
 
     if not to_delete:
-        print("No orphaned cache objects found")
+        print(f"{colourize('✓', 'GREEN')} No orphaned cache objects found")
         return 0
 
     if dry_run:
@@ -2623,9 +2706,10 @@ def cmd_clean(
     # Delete files
     deleted_count = 0
     freed_bytes = 0
+    tracker = ProgressTracker(len(to_delete), verbose=bool(verbose))
     for obj_path in to_delete:
         try:
-            print(f"  Deleting {obj_path.name}...")
+            tracker.advance(obj_path.name)
             size = obj_path.stat().st_size
             obj_path.unlink()
             deleted_count += 1
@@ -2636,41 +2720,51 @@ def cmd_clean(
     # Clean up empty directories
     _cleanup_empty_dirs(objects_dir)
 
-    print(f"Deleted {deleted_count} objects, freed {format_bytes(freed_bytes)}")
+    tracker.done(
+        f"Deleted {deleted_count} {pluralize(deleted_count, 'object')}, freed {format_bytes(freed_bytes)}"
+    )
     return 0
 
 
 def cmd_repair(
-    repo_root: Path, vlfs_dir: Path, cache_dir: Path, dry_run: bool = False
+    repo_root: Path,
+    vlfs_dir: Path,
+    cache_dir: Path,
+    dry_run: bool = False,
+    verbose: int = 0,
 ) -> int:
     """Execute repair command that fixes common issues."""
-    print(colourize("Starting VLFS Repair...", "CYAN"))
-
     # 1. Clean local cache (remove orphans)
-    print("\n[1/3] Cleaning local cache...")
-    cmd_clean(repo_root, vlfs_dir, cache_dir, dry_run=dry_run, yes=True)
+    print("[1/3] Cleaning local cache...")
+    cmd_clean(repo_root, vlfs_dir, cache_dir, dry_run=dry_run, yes=True, verbose=verbose)
 
     # 2. Verify remote objects and fix 404s
-    print("\n[2/3] Verifying and repairing remote objects...")
+    print("[2/3] Verifying remote objects...")
     cmd_verify(
-        repo_root, vlfs_dir, cache_dir, remote=True, fix=True, dry_run=dry_run
+        repo_root,
+        vlfs_dir,
+        cache_dir,
+        remote=True,
+        fix=True,
+        dry_run=dry_run,
+        verbose=verbose,
     )
 
     # 3. Synchronize cache to remote (Final safety net)
-    print("\n[3/3] Finalizing cloud synchronization...")
+    print("[3/3] Syncing to cloud...")
     if dry_run:
         print("[DRY-RUN] Would run: rclone sync .vlfs-cache/objects r2:vlfs")
     else:
         try:
-            print("  Syncing local cache to R2...")
-            run_rclone(
-                ["sync", str(cache_dir / "objects"), "r2:vlfs", "-P"],
-                capture_output=False,
-            )
+            cmd = ["sync", str(cache_dir / "objects"), "r2:vlfs"]
+            if verbose:
+                cmd.append("-P")
+            run_rclone(cmd, capture_output=not verbose)
+            print(f"{colourize('✓', 'GREEN')} Synced cache to R2")
         except Exception as e:
-            print(f"  Warning: Final sync failed: {e}", file=sys.stderr)
+            print(f"Warning: Final sync failed: {e}", file=sys.stderr)
 
-    print(colourize("\nRepair complete!", "GREEN"))
+    print(f"{colourize('✓', 'GREEN')} Repair complete!")
     return 0
 
 
@@ -2689,6 +2783,7 @@ def _push_single_file_collect(
     compression_level: int = 3,
     r2_bucket: str = "vlfs",
     drive_bucket: str = "vlfs",
+    verbose: int = 0,
 ) -> tuple[int, dict[str, dict[str, Any]] | None]:
     """Push a single file to remote and return index entry update."""
     # Ensure file is within repo
@@ -2706,7 +2801,7 @@ def _push_single_file_collect(
     logger.debug(f"Stored in cache with key: {object_key}")
 
     # Compute hash and size
-    hex_digest, size, mtime = hash_file(src_path)
+    hex_digest, size, mtime = hash_file(src_path, verbose=False)
     compressed_size = (cache_dir / "objects" / object_key).stat().st_size
     logger.debug(f"Hash: {hex_digest}, Size: {size}, Compressed: {compressed_size}")
 
@@ -2714,11 +2809,7 @@ def _push_single_file_collect(
     remote = "gdrive" if private else "r2"
     logger.debug(f"Target remote: {remote}")
 
-    if not dry_run:
-        print(f"Pushing {rel_path} to {remote} ({format_bytes(size)})...")
-
     if dry_run:
-        print(f"[DRY-RUN] Would upload {rel_path} to {remote} ({format_bytes(size)})")
         logger.info(f"[DRY-RUN] Would upload {rel_path} to {remote}")
     else:
         # Upload to remote
@@ -2734,21 +2825,24 @@ def _push_single_file_collect(
                 upload_to_drive(
                     cache_dir / "objects" / object_key,
                     object_key,
-                    bucket=drive_bucket,
-                    dry_run=False,
+                    **(
+                        {"bucket": drive_bucket, "dry_run": False, "verbose": True}
+                        if verbose
+                        else {"bucket": drive_bucket, "dry_run": False}
+                    ),
                 )
                 logger.info(f"Uploaded to Drive: {rel_path}")
             else:
                 upload_to_r2(
                     cache_dir / "objects" / object_key,
                     object_key,
-                    bucket=r2_bucket,
-                    dry_run=False,
+                    **(
+                        {"bucket": r2_bucket, "dry_run": False, "verbose": True}
+                        if verbose
+                        else {"bucket": r2_bucket, "dry_run": False}
+                    ),
                 )
                 logger.info(f"Uploaded to R2: {rel_path}")
-            print(
-                f"Uploaded: {rel_path} ({format_bytes(size)} -> {format_bytes(compressed_size)})"
-            )
         except RcloneError as e:
             print(f"Error uploading {rel_path}: {e}", file=sys.stderr)
             return 1, None
@@ -2780,6 +2874,7 @@ def _download_remote_group(
     r2_bucket: str = "vlfs",
     drive_bucket: str = "vlfs",
     force: bool = False,
+    verbose: int = 0,
 ) -> int:
     """Download missing objects for a remote group and return count."""
     if force:
@@ -2799,10 +2894,19 @@ def _download_remote_group(
             )
             return len(to_download)
 
-        print(
-            f"Downloading {len(to_download)} objects ({format_bytes(missing_size)}) via HTTP..."
+        if verbose:
+            print(
+                f"Downloading {len(to_download)} objects ({format_bytes(missing_size)}) via HTTP..."
+            )
+        tracker = ProgressTracker(len(to_download), verbose=bool(verbose)) if verbose else None
+        return download_from_r2_http(
+            to_download,
+            cache_dir,
+            r2_public_url,
+            dry_run,
+            force=force,
+            **({"verbose": True, "tracker": tracker} if verbose else {}),
         )
-        return download_from_r2_http(to_download, cache_dir, r2_public_url, dry_run, force=force)
 
     if dry_run:
         print(
@@ -2810,9 +2914,10 @@ def _download_remote_group(
         )
         return len(to_download)
 
-    print(
-        f"Downloading {len(to_download)} objects ({format_bytes(missing_size)}) from {remote}..."
-    )
+    if verbose:
+        print(
+            f"Downloading {len(to_download)} objects ({format_bytes(missing_size)}) from {remote}..."
+        )
 
     if remote == "gdrive":
         try:
@@ -2830,15 +2935,34 @@ def _download_remote_group(
             return 0
 
         return download_from_drive(
-            to_download, cache_dir, bucket=drive_bucket, dry_run=False, force=force
+            to_download,
+            cache_dir,
+            bucket=drive_bucket,
+            dry_run=False,
+            force=force,
+            **({"verbose": True} if verbose else {}),
         )
 
     # Default to R2 (rclone)
     if not r2_public_url:
-        return download_from_r2(to_download, cache_dir, bucket=r2_bucket, dry_run=False, force=force)
+        return download_from_r2(
+            to_download,
+            cache_dir,
+            bucket=r2_bucket,
+            dry_run=False,
+            force=force,
+            **({"verbose": True} if verbose else {}),
+        )
 
     # Fallback to HTTP if configured
-    return download_from_r2_http(to_download, cache_dir, r2_public_url, dry_run, force=force)
+    return download_from_r2_http(
+        to_download,
+        cache_dir,
+        r2_public_url,
+        dry_run,
+        force=force,
+        **({"verbose": True} if verbose else {}),
+    )
 
 
 def _match_recursive_glob(rel_path: str, pattern: str) -> bool:
@@ -3174,7 +3298,7 @@ def main(argv: list[str] | None = None) -> int:
         set_rclone_config_path(None)
 
     if args.command == "status":
-        return cmd_status(repo_root, vlfs_dir, dry_run, json_output, args.color)
+        return cmd_status(repo_root, vlfs_dir, dry_run, json_output, args.color, args.verbose)
     elif args.command == "ls":
         return cmd_list(
             repo_root,
@@ -3193,13 +3317,14 @@ def main(argv: list[str] | None = None) -> int:
             getattr(args, "fix", False),
             dry_run,
             json_output,
+            args.verbose,
         )
     elif args.command == "clean":
-        return cmd_clean(repo_root, vlfs_dir, cache_dir, dry_run, args.yes)
+        return cmd_clean(repo_root, vlfs_dir, cache_dir, dry_run, args.yes, args.verbose)
     elif args.command == "lookup":
         return cmd_lookup(repo_root, vlfs_dir, args.query)
     elif args.command == "repair":
-        return cmd_repair(repo_root, vlfs_dir, cache_dir, dry_run)
+        return cmd_repair(repo_root, vlfs_dir, cache_dir, dry_run, args.verbose)
     elif args.command == "remove":
         return cmd_remove(
             repo_root,
@@ -3209,6 +3334,7 @@ def main(argv: list[str] | None = None) -> int:
             args.force,
             dry_run,
             args.delete_file,
+            args.verbose,
         )
     elif args.command == "pull":
         return cmd_pull(
@@ -3219,17 +3345,18 @@ def main(argv: list[str] | None = None) -> int:
             dry_run,
             getattr(args, "path", None),
             getattr(args, "restore", False),
+            args.verbose,
         )
     elif args.command == "push":
         if args.all:
-            return cmd_push_all(repo_root, vlfs_dir, cache_dir, args.private, dry_run)
+            return cmd_push_all(repo_root, vlfs_dir, cache_dir, args.private, dry_run, args.verbose)
         elif args.glob:
             return cmd_push_glob(
-                repo_root, vlfs_dir, cache_dir, args.glob, args.private, dry_run
+                repo_root, vlfs_dir, cache_dir, args.glob, args.private, dry_run, args.verbose
             )
         elif args.paths:
             return cmd_push(
-                repo_root, vlfs_dir, cache_dir, args.paths, args.private, dry_run
+                repo_root, vlfs_dir, cache_dir, args.paths, args.private, dry_run, args.verbose
             )
         else:
             print("Error: push requires a path, --glob, or --all", file=sys.stderr)
